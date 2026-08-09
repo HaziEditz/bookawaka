@@ -90,7 +90,7 @@ export default function FoodPage() {
             <div className="bg-primary rounded-[2rem] p-10 md:p-12 text-center text-primary-foreground">
               <h2 className="text-2xl md:text-3xl font-display font-black mb-3">Own a restaurant or café?</h2>
               <p className="text-primary-foreground/80 font-medium mb-8 max-w-lg mx-auto">Partner with BookaWaka to reach more customers across Southland. Easy setup, no lock-in.</p>
-              <a href="https://bookawaka-dispatch-system.replit.app/DispatcherLogin.aspx" target="_blank" rel="noopener noreferrer">
+              <a href={`${import.meta.env.BASE_URL}register`}>
                 <Button size="lg" className="bg-accent text-accent-foreground hover:bg-white rounded-full h-14 px-10 font-extrabold shadow-xl">
                   Partner With Us <ArrowRight className="w-5 h-5 ml-2" />
                 </Button>

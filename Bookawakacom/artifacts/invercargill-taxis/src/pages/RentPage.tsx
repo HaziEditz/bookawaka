@@ -36,7 +36,7 @@ export default function RentPage() {
           </div>
           <span className="font-display font-extrabold text-xl tracking-tight">BookaWaka</span>
         </a>
-        <a href="https://bookawaka-dispatch-system.replit.app/DispatcherLogin.aspx" target="_blank" rel="noopener noreferrer">
+        <a href={`${import.meta.env.BASE_URL}register`}>
           <Button size="sm" className="bg-accent text-accent-foreground hover:bg-accent/90 rounded-full font-bold">
             List Your Fleet
           </Button>
@@ -121,7 +121,7 @@ export default function RentPage() {
               <p className="text-primary-foreground/80 font-medium mb-8 max-w-lg mx-auto">
                 List your cars, vans, or SUVs on BookaWaka and reach customers across Southland. Quick setup, transparent pricing.
               </p>
-              <a href="https://bookawaka-dispatch-system.replit.app/DispatcherLogin.aspx" target="_blank" rel="noopener noreferrer">
+              <a href={`${import.meta.env.BASE_URL}register`}>
                 <Button size="lg" className="bg-accent text-accent-foreground hover:bg-white rounded-full h-14 px-10 font-extrabold shadow-xl">
                   List Your Fleet <ArrowRight className="w-5 h-5 ml-2" />
                 </Button>
