@@ -137,6 +137,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     notes,
     amount,
     paymentMethod,
+    vehicleType,
     pickLat,
     pickLng,
     dropLat,
@@ -162,6 +163,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     pickAddress?: string;
     dropAddress?: string;
     scheduledFor?: string;
+    vehicleType?: string;
     notes?: string;
     amount?: number;
     paymentMethod?: "card" | "account" | "acc" | "tm" | "giftcard";
@@ -374,6 +376,11 @@ bookingsRouter.post("/bookings", async (req, res) => {
     Status: status,
     WebBooking: true,
     dispatcherOnly: false,
+    // Vehicle type — same labels as passenger app (Sedan/SUV/Van/Luxury/Electric/Wheelchair).
+    // Auto-dispatch filters on VehicleType via _driverEligibleForJob.
+    ...(vehicleType
+      ? { VehicleType: String(vehicleType).trim(), vehicleType: String(vehicleType).trim() }
+      : {}),
     // Payment fields — SA reports read PascalCase + boolean flags
     paymentMethod: effectiveMethod,
     PaymentMethod: effectiveMethod,
@@ -568,6 +575,7 @@ async function sendBookingEmails({
     <table style="width:100%;border-collapse:collapse;">
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;width:130px;">Booking ID</td><td style="padding:8px 0;color:#555;">${booking.BookingId}</td></tr>
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Service</td><td style="padding:8px 0;color:#555;">${booking.ServiceType ?? "Taxi"}</td></tr>
+      ${booking.VehicleType ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Vehicle</td><td style="padding:8px 0;color:#555;">${booking.VehicleType}</td></tr>` : ""}
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Passenger</td><td style="padding:8px 0;color:#555;">${booking.PassengerName}</td></tr>
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Phone</td><td style="padding:8px 0;color:#555;">${booking.PassengerPhone}</td></tr>
       ${booking.PassengerEmail ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Email</td><td style="padding:8px 0;color:#555;">${booking.PassengerEmail}</td></tr>` : ""}

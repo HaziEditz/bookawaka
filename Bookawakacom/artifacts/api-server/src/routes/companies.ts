@@ -28,18 +28,33 @@ companiesRouter.get("/companies", async (req, res) => {
       return;
     }
 
+    // Merge companySettings (Owner Panel) for operating hours when present.
+    // Field is optional / often empty until companies configure hours.
+    const settingsSnap = await db.ref("/companySettings").once("value");
+    const settingsMap = (settingsSnap.val() as Record<string, any> | null) ?? {};
+
     const companies = Object.entries(profiles)
       .filter(([, v]) => v && v.active !== false)
-      .map(([id, v]) => ({
-        id,
-        name: v.name ?? `Company ${id}`,
-        services: v.services ?? ["taxi"],
-        active: v.active ?? true,
-        description: v.description ?? "",
-        city: v.city ?? "",
-        country: v.country ?? "New Zealand",
-        email: v.email ?? "",
-      }));
+      .map(([id, v]) => {
+        const settings = settingsMap[id] || {};
+        const hours =
+          settings.operatingHours ??
+          settings.operating_hours ??
+          v.operatingHours ??
+          v.operating_hours ??
+          "";
+        return {
+          id,
+          name: v.name ?? settings.name ?? `Company ${id}`,
+          services: settings.services ?? v.services ?? ["taxi"],
+          active: v.active ?? true,
+          description: v.description ?? "",
+          city: v.city ?? settings.city ?? "",
+          country: v.country ?? "New Zealand",
+          email: v.email ?? settings.email ?? "",
+          operatingHours: typeof hours === "string" ? hours : "",
+        };
+      });
 
     res.json({ companies });
   } catch (err: any) {
@@ -68,6 +83,7 @@ companiesRouter.get("/public/companies", async (req, res) => {
         services: v.services ?? ["taxi"],
         city: v.city ?? "",
         country: v.country ?? "New Zealand",
+        operatingHours: typeof v.operatingHours === "string" ? v.operatingHours : "",
       }));
 
     res.json({ companies });

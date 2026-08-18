@@ -56,7 +56,22 @@ interface Company {
   description?: string;
   city?: string;
   country?: string;
+  email?: string;
+  /** Free-text hours from companySettings when configured (often empty today). */
+  operatingHours?: string;
 }
+
+/** Same set as passenger-app booking — used for dispatch VehicleType eligibility. */
+const VEHICLE_TYPES = ["Sedan", "SUV", "Van", "Luxury", "Electric", "Wheelchair"] as const;
+type VehicleTypeOption = (typeof VEHICLE_TYPES)[number];
+const VEHICLE_LABELS: Record<VehicleTypeOption, string> = {
+  Sedan: "Sedan",
+  SUV: "SUV",
+  Van: "Van",
+  Luxury: "Luxury",
+  Electric: "Electric",
+  Wheelchair: "Accessible / WAV",
+};
 
 function normalizeServices(services: unknown): string[] {
   if (Array.isArray(services)) {
@@ -79,6 +94,11 @@ function normalizeCompanies(raw: unknown): Company[] {
       description: c.description != null ? String(c.description) : undefined,
       city: c.city != null ? String(c.city) : undefined,
       country: c.country != null ? String(c.country) : undefined,
+      email: c.email != null ? String(c.email) : undefined,
+      operatingHours:
+        c.operatingHours != null && String(c.operatingHours).trim()
+          ? String(c.operatingHours).trim()
+          : undefined,
     }))
     .filter((c) => c.id);
 }
@@ -228,6 +248,7 @@ export default function BookPage() {
   const [paidByCard, setPaidByCard] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("card");
+  const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Sedan");
   const [paymentRef, setPaymentRef] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState(false);
@@ -622,6 +643,7 @@ export default function BookPage() {
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
         paymentMethod: method,
+        vehicleType: selectedService === "taxi" ? vehicleType : undefined,
         pickLat: pickCoords?.lat ?? 0,
         pickLng: pickCoords?.lng ?? 0,
         dropLat: dropCoords?.lat ?? 0,
@@ -922,6 +944,11 @@ export default function BookPage() {
                             {c.city && (
                               <div className="text-sm text-muted-foreground flex items-center gap-1">
                                 <MapPin className="w-3 h-3 flex-shrink-0" />{c.city}
+                              </div>
+                            )}
+                            {c.operatingHours && (
+                              <div className="text-sm text-muted-foreground flex items-center gap-1">
+                                Hours: {c.operatingHours}
                               </div>
                             )}
                             {c.country && (
@@ -1293,9 +1320,43 @@ export default function BookPage() {
                   </p>
                 </div>
 
+                {selectedService === "taxi" && (
+                  <div className="space-y-3">
+                    <Label className="font-bold text-sm">Vehicle type</Label>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {VEHICLE_TYPES.map((vt) => (
+                        <button
+                          key={vt}
+                          type="button"
+                          onClick={() => setVehicleType(vt)}
+                          className={`px-3 py-3 rounded-xl border-2 font-bold text-sm transition-all ${
+                            vehicleType === vt
+                              ? "bg-primary text-white border-primary shadow-md"
+                              : "bg-card text-muted-foreground border-border hover:border-primary/50"
+                          }`}
+                        >
+                          {VEHICLE_LABELS[vt]}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Accessible / WAV is required for wheelchair hoist trips. Dispatch will match this type when offering drivers.
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-2">
-                  <Label htmlFor="notes" className="font-bold text-sm">Additional Notes</Label>
-                  <Textarea id="notes" name="notes" value={form.notes} onChange={handleChange} placeholder="Any extra info for the driver…" rows={3} className="rounded-xl resize-none" />
+                  <Label htmlFor="notes" className="font-bold text-sm">Pickup notes for the driver</Label>
+                  <Textarea
+                    id="notes"
+                    name="notes"
+                    value={form.notes}
+                    onChange={handleChange}
+                    placeholder="Gate code, entrance, landmark, or other instructions for the driver…"
+                    rows={3}
+                    className="rounded-xl resize-none"
+                  />
+                  <p className="text-xs text-muted-foreground">One-way note — the driver can read this on the job; you cannot change it after a driver is assigned.</p>
                 </div>
 
                 {/* Payment method — selected here, locked on confirm step */}
@@ -1419,8 +1480,14 @@ export default function BookPage() {
 
               <div className="bg-card border border-border rounded-[1.5rem] p-6 md:p-8 shadow-xl space-y-4 mb-6">
                 <Row label="Company" value={selectedCompany?.name ?? ""} />
+                {selectedCompany?.operatingHours && (
+                  <Row label="Operating hours" value={selectedCompany.operatingHours} />
+                )}
                 <Row label="Service" value={SERVICE_LABELS[selectedService]?.label ?? selectedService} />
                 {selectedService === "food" && selectedRestaurant && <Row label="Restaurant" value={selectedRestaurant.name} />}
+                {selectedService === "taxi" && (
+                  <Row label="Vehicle" value={VEHICLE_LABELS[vehicleType]} />
+                )}
                 <Row label="Passenger" value={form.passengerName} />
                 <Row label="Phone" value={form.passengerPhone} />
                 {form.passengerEmail && <Row label="Email" value={form.passengerEmail} />}
@@ -1438,7 +1505,7 @@ export default function BookPage() {
                 {bookingType === "scheduled" && form.notifyBefore && (
                   <Row label="Dispatch alert" value={`${form.notifyBefore} minutes before pickup`} />
                 )}
-                {form.notes && <Row label="Notes" value={form.notes} />}
+                {form.notes && <Row label="Pickup notes" value={form.notes} />}
                 {cartItems.length > 0 && (
                   <>
                     <hr className="border-border" />
