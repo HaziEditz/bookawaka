@@ -22,10 +22,6 @@ import {
   CheckCircle2,
   Loader2,
   ArrowLeft,
-  Clock,
-  User,
-  Phone,
-  Mail,
   CreditCard,
   DollarSign,
   CalendarClock,
@@ -101,15 +97,6 @@ function normalizeCompanies(raw: unknown): Company[] {
           : undefined,
     }))
     .filter((c) => c.id);
-}
-
-interface Tariff {
-  id: string;
-  name: string;
-  flagFall: number | null;
-  ratePerKm: number | null;
-  minFare: number | null;
-  currency: string;
 }
 
 interface MenuItem {
@@ -188,14 +175,14 @@ const PAYMENT_METHODS: Array<{
     label: "Card",
     icon: <CreditCard className="w-4 h-4" />,
     placeholder: "",
-    help: "Secure card payment via Stripe. An estimated fare amount is required.",
+    help: "Pay securely by card. The trip price is charged at checkout.",
   },
   {
     value: "cash",
     label: "Cash",
     icon: <DollarSign className="w-4 h-4" />,
     placeholder: "",
-    help: "Pay the driver in cash at the end of the trip. Available when the operator enables cash bookings.",
+    help: "Pay the driver in cash at the end of the trip.",
   },
   {
     value: "account",
@@ -262,13 +249,12 @@ export default function BookPage() {
   const [verified, setVerified] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const verifyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [tariffs, setTariffs] = useState<Tariff[]>([]);
   const [pickCoords, setPickCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [dropCoords, setDropCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [pickAddressActive, setPickAddressActive] = useState(false);
   const [dropAddressActive, setDropAddressActive] = useState(false);
   const mapPointerEventsDisabled = pickAddressActive;
-  const [fareEstimate, setFareEstimate] = useState<{ estimate: number; tariff: string; distanceKm: number } | null>(null);
+  const [fareEstimate, setFareEstimate] = useState<{ estimate: number; distanceKm: number } | null>(null);
   const [fareLoading, setFareLoading] = useState(false);
 
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
@@ -392,14 +378,6 @@ export default function BookPage() {
   }, []);
 
   useEffect(() => {
-    if (!selectedCompany) return;
-    fetch(`${import.meta.env.BASE_URL}api/tariffs?cid=${selectedCompany.id}`)
-      .then((r) => r.json())
-      .then((d) => setTariffs(d.tariffs ?? []))
-      .catch(() => setTariffs([]));
-  }, [selectedCompany]);
-
-  useEffect(() => {
     if (!selectedCompany) {
       setPaymentConfig(null);
       return;
@@ -467,10 +445,10 @@ export default function BookPage() {
     else setDropCoords(coords);
   };
 
-  // Auto-verify payment reference for non-card methods with debounce
+  // Auto-verify payment reference for methods that need a reference (not card/cash)
   useEffect(() => {
-    if (paymentMethod === "card" || !selectedCompany) {
-      setVerified(false);
+    if (paymentMethod === "card" || paymentMethod === "cash" || !selectedCompany) {
+      setVerified(paymentMethod === "cash" || paymentMethod === "card");
       setVerifyError(null);
       if (verifyDebounceRef.current) clearTimeout(verifyDebounceRef.current);
       setVerifying(false);
@@ -607,7 +585,7 @@ export default function BookPage() {
         const d = await r.json();
         if (cancelled) return;
         if (d.estimatedFare != null) {
-          setFareEstimate({ estimate: d.estimatedFare, tariff: d.tariffName ?? "", distanceKm: d.distanceKm ?? 0 });
+          setFareEstimate({ estimate: d.estimatedFare, distanceKm: d.distanceKm ?? 0 });
           setForm((prev) => ({ ...prev, amount: d.estimatedFare.toFixed(2) }));
         } else {
           setFareEstimate(null);
@@ -1122,11 +1100,16 @@ export default function BookPage() {
               >
                 <ArrowLeft className="w-4 h-4" /> Back
               </button>
-              <h1 className="text-3xl md:text-4xl font-display font-black text-foreground mb-2">Your details</h1>
-              <p className="text-muted-foreground font-medium mb-8">
-                <span className="font-bold text-foreground">{selectedCompany?.name}</span> · <span className="capitalize">{SERVICE_LABELS[selectedService]?.label ?? selectedService}</span>
+              <h1 className="text-3xl md:text-4xl font-display font-bold text-foreground mb-2">Trip details</h1>
+              <p className="text-muted-foreground mb-8">
+                <span className="font-semibold text-foreground">{selectedCompany?.name}</span>
+                <span className="mx-2 text-border">·</span>
+                <span>{SERVICE_LABELS[selectedService]?.label ?? selectedService}</span>
                 {selectedService === "food" && selectedRestaurant && (
-                  <> · <span className="font-bold text-foreground">{selectedRestaurant.name}</span></>
+                  <>
+                    <span className="mx-2 text-border">·</span>
+                    <span className="font-semibold text-foreground">{selectedRestaurant.name}</span>
+                  </>
                 )}
               </p>
 
@@ -1142,7 +1125,7 @@ export default function BookPage() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  if (paymentMethod !== "card") {
+                  if (paymentMethod !== "card" && paymentMethod !== "cash") {
                     if (!paymentRef.trim()) {
                       setError(`Please enter your ${PAYMENT_METHODS.find((m) => m.value === paymentMethod)?.placeholder?.toLowerCase() ?? "payment reference"}.`);
                       return;
@@ -1152,39 +1135,42 @@ export default function BookPage() {
                       return;
                     }
                   }
+                  if (selectedService === "taxi" && !fareEstimate && !hasAmount) {
+                    setError("Please confirm pickup and drop-off so we can calculate your trip price.");
+                    return;
+                  }
                   setError(null);
                   setStep(3);
                 }}
-                className="space-y-5 bg-card border border-border rounded-[1.5rem] p-6 md:p-8 shadow-xl overflow-visible"
+                className="space-y-6 bg-card border border-border/80 rounded-2xl p-6 md:p-8 shadow-sm overflow-visible"
               >
                 <div className="grid sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="passengerName" className="font-bold text-sm flex items-center gap-2"><User className="w-4 h-4 text-primary" /> Your Name <span className="text-destructive">*</span></Label>
-                    <Input id="passengerName" name="passengerName" value={form.passengerName} onChange={handleChange} placeholder="e.g. Jane Smith" required className="rounded-xl h-12" />
+                    <Label htmlFor="passengerName" className="font-semibold text-sm">Name <span className="text-destructive">*</span></Label>
+                    <Input id="passengerName" name="passengerName" value={form.passengerName} onChange={handleChange} placeholder="e.g. Jane Smith" required className="rounded-xl h-11" />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="passengerPhone" className="font-bold text-sm flex items-center gap-2"><Phone className="w-4 h-4 text-primary" /> Phone Number <span className="text-destructive">*</span></Label>
-                    <Input id="passengerPhone" name="passengerPhone" value={form.passengerPhone} onChange={handleChange} placeholder="e.g. 021 123 4567" required className="rounded-xl h-12" />
+                    <Label htmlFor="passengerPhone" className="font-semibold text-sm">Phone <span className="text-destructive">*</span></Label>
+                    <Input id="passengerPhone" name="passengerPhone" value={form.passengerPhone} onChange={handleChange} placeholder="e.g. 021 123 4567" required className="rounded-xl h-11" />
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="passengerEmail" className="font-bold text-sm flex items-center gap-2">
-                    <Mail className="w-4 h-4 text-primary" /> Email <span className="text-destructive">*</span>
+                  <Label htmlFor="passengerEmail" className="font-semibold text-sm">
+                    Email <span className="text-destructive">*</span>
                   </Label>
-                  <Input id="passengerEmail" name="passengerEmail" type="email" value={form.passengerEmail} onChange={handleChange} placeholder="you@example.com" required className="rounded-xl h-12" />
+                  <Input id="passengerEmail" name="passengerEmail" type="email" value={form.passengerEmail} onChange={handleChange} placeholder="you@example.com" required className="rounded-xl h-11" />
                 </div>
 
                 <div
                   className={`space-y-2 relative ${pickAddressActive ? "z-[60]" : ""}`}
                 >
-                  <Label htmlFor="pickAddress" className="font-bold text-sm flex items-center gap-2">
-                    {selectedService === "food" ? <Store className="w-4 h-4 text-primary" /> : <MapPin className="w-4 h-4 text-primary" />}
-                    {selectedService === "food" ? "Restaurant Address" : "Pickup Address"}
-                    <span className="text-destructive">*</span>
+                  <Label htmlFor="pickAddress" className="font-semibold text-sm">
+                    {selectedService === "food" ? "Restaurant address" : "Pickup"}
+                    <span className="text-destructive"> *</span>
                   </Label>
                   {selectedService === "food" && selectedRestaurant ? (
-                    <div className="rounded-xl h-12 border border-border bg-muted/40 flex items-center px-3 text-sm text-muted-foreground">
+                    <div className="rounded-xl h-11 border border-border bg-muted/40 flex items-center px-3 text-sm text-muted-foreground">
                       <MapPin className="w-3.5 h-3.5 mr-2 text-primary flex-shrink-0" />
                       {form.pickAddress || selectedRestaurant.address}
                     </div>
@@ -1200,7 +1186,6 @@ export default function BookPage() {
                         placeholder="Start typing your pickup location…"
                         required
                       />
-                      <p className="text-xs text-muted-foreground">Start typing — address suggestions will appear.</p>
                     </>
                   )}
                 </div>
@@ -1208,10 +1193,9 @@ export default function BookPage() {
                 <div
                   className={`space-y-2 relative ${dropAddressActive ? "z-[70]" : pickAddressActive ? "z-[1]" : ""}`}
                 >
-                  <Label htmlFor="dropAddress" className="font-bold text-sm flex items-center gap-2">
-                    <Navigation className="w-4 h-4 text-primary" />
-                    {selectedService === "food" ? "Delivery Address" : "Drop-off Address"}
-                    <span className="text-destructive">*</span>
+                  <Label htmlFor="dropAddress" className="font-semibold text-sm">
+                    {selectedService === "food" ? "Delivery address" : "Drop-off"}
+                    <span className="text-destructive"> *</span>
                   </Label>
                   <AddressInput
                     id="dropAddress"
@@ -1225,35 +1209,40 @@ export default function BookPage() {
                   />
                 </div>
 
-                {/* Live fare estimate — appears once both addresses are selected from suggestions */}
+                {/* Trip price — single read-only display (no tariff names, not editable) */}
                 {selectedService === "taxi" && (fareLoading || fareEstimate) && (
-                  <div className={`rounded-xl border px-4 py-3 flex items-center gap-3 ${fareEstimate ? "bg-emerald-50 border-emerald-200" : "bg-muted/40 border-border"}`}>
+                  <div className="rounded-2xl border border-border bg-muted/30 px-5 py-4">
                     {fareLoading ? (
-                      <><Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" /><span className="text-sm text-muted-foreground">Calculating fare estimate…</span></>
+                      <div className="flex items-center gap-3 text-muted-foreground">
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        <span className="text-sm">Calculating trip price…</span>
+                      </div>
                     ) : fareEstimate ? (
-                      <>
-                        <DollarSign className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <div>
-                          <span className="text-sm font-bold text-emerald-800">Trip price: ${fareEstimate.estimate.toFixed(2)} NZD</span>
-                          <span className="text-xs text-emerald-700 ml-2">({fareEstimate.distanceKm} km · {fareEstimate.tariff})</span>
-                          <p className="text-xs text-emerald-700 mt-0.5">Fixed price for this trip — the driver will not run a live meter.</p>
-                        </div>
-                      </>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Trip price</p>
+                        <p className="text-2xl font-semibold tracking-tight text-foreground mt-0.5">
+                          ${fareEstimate.estimate.toFixed(2)}
+                          <span className="text-sm font-medium text-muted-foreground ml-1.5">NZD</span>
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Fixed price{fareEstimate.distanceKm > 0 ? ` · ${fareEstimate.distanceKm} km` : ""} — paid as selected below
+                        </p>
+                      </div>
                     ) : null}
                   </div>
                 )}
 
                 {/* When — Now / Scheduled toggle */}
                 <div className="space-y-3">
-                  <Label className="font-bold text-sm flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> When?</Label>
+                  <Label className="font-semibold text-sm text-foreground">When</Label>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={() => setBookingType("now")}
-                      className={`flex items-center justify-center gap-2 rounded-xl h-12 font-bold text-sm border-2 transition-all ${
+                      className={`flex items-center justify-center gap-2 rounded-xl h-11 font-semibold text-sm border transition-colors ${
                         bookingType === "now"
-                          ? "bg-primary text-white border-primary shadow-md"
-                          : "bg-card text-muted-foreground border-border hover:border-primary/50"
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-muted-foreground border-border hover:border-foreground/30"
                       }`}
                     >
                       <Zap className="w-4 h-4" /> Now
@@ -1261,10 +1250,10 @@ export default function BookPage() {
                     <button
                       type="button"
                       onClick={() => setBookingType("scheduled")}
-                      className={`flex items-center justify-center gap-2 rounded-xl h-12 font-bold text-sm border-2 transition-all ${
+                      className={`flex items-center justify-center gap-2 rounded-xl h-11 font-semibold text-sm border transition-colors ${
                         bookingType === "scheduled"
-                          ? "bg-primary text-white border-primary shadow-md"
-                          : "bg-card text-muted-foreground border-border hover:border-primary/50"
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-muted-foreground border-border hover:border-foreground/30"
                       }`}
                     >
                       <CalendarClock className="w-4 h-4" /> Schedule
@@ -1280,165 +1269,83 @@ export default function BookPage() {
                         onChange={handleChange}
                         required={bookingType === "scheduled"}
                         min={new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 16)}
-                        className="rounded-xl h-12"
+                        className="rounded-xl h-11"
                       />
-                      <p className="text-xs text-muted-foreground">Choose a date and time at least 5 minutes from now.</p>
+                      <p className="text-xs text-muted-foreground">At least 5 minutes from now.</p>
                       <div>
-                        <p className="text-xs font-bold text-muted-foreground mb-2">Alert dispatch how many minutes before pickup?</p>
+                        <p className="text-xs font-medium text-muted-foreground mb-2">Notify dispatch before pickup</p>
                         <div className="flex gap-2 flex-wrap">
                           {["15", "30", "45", "60"].map((m) => (
                             <button
                               key={m}
                               type="button"
                               onClick={() => setForm((prev) => ({ ...prev, notifyBefore: m }))}
-                              className={`px-3 py-1.5 rounded-full text-sm font-bold border-2 transition-all ${form.notifyBefore === m ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:border-primary/50"}`}
+                              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${form.notifyBefore === m ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-foreground/30"}`}
                             >
                               {m} min
                             </button>
                           ))}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1.5">Dispatch will be notified this many minutes before the scheduled pickup time.</p>
                       </div>
                     </div>
                   )}
                 </div>
 
-                {/* Fare guide — pulled from tariffs/{cid}, isTM excluded */}
-                {tariffs.length > 0 && selectedService === "taxi" && (
-                  <div className="rounded-xl border border-border bg-muted/40 p-4 space-y-2">
-                    <p className="text-xs font-extrabold uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
-                      <DollarSign className="w-3.5 h-3.5" /> Fare Guide
-                    </p>
-                    <div className="divide-y divide-border">
-                      {tariffs.map((t) => (
-                        <div key={t.id} className="py-2 first:pt-0 last:pb-0 flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5">
-                          <span className="text-sm font-bold text-foreground">{t.name}</span>
-                          <div className="flex gap-3 text-xs text-muted-foreground">
-                            {t.flagFall != null && (
-                              <span>Flag fall <strong className="text-foreground">${t.flagFall.toFixed(2)}</strong></span>
-                            )}
-                            {t.ratePerKm != null && (
-                              <span><strong className="text-foreground">${t.ratePerKm.toFixed(2)}</strong>/km</span>
-                            )}
-                            {t.minFare != null && (
-                              <span>Min <strong className="text-foreground">${t.minFare.toFixed(2)}</strong></span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">Rates set by the operator. Trip price is calculated from the matching Purpose + time-of-day tariff.</p>
-                  </div>
-                )}
-
-                {/* Amount field — auto-filled from tariff estimate, editable */}
-                <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-2">
-                  <Label htmlFor="amount" className="font-bold text-sm flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-primary" /> Fare (NZD)
-                    {fareEstimate && (
-                      <span className="text-emerald-700 font-normal text-xs">auto-calculated from tariff</span>
-                    )}
-                  </Label>
-                  <Input
-                    id="amount"
-                    name="amount"
-                    type="number"
-                    min="0.50"
-                    step="0.01"
-                    value={form.amount}
-                    onChange={handleChange}
-                    placeholder="e.g. 24.50"
-                    className="rounded-xl h-12 bg-white"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {fareEstimate
-                      ? `Fixed price from ${fareEstimate.tariff} (${fareEstimate.distanceKm} km). You can adjust if needed. Required to pay by card.`
-                      : "Auto-filled once both addresses are confirmed. Required to pay by card."}
-                  </p>
-                </div>
-
                 {selectedService === "taxi" && (
-                  <div className="space-y-3">
-                    <Label className="font-bold text-sm">Passengers</Label>
-                    <div className="flex gap-2 flex-wrap">
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
-                        <button
-                          key={n}
-                          type="button"
-                          onClick={() => setPassengers(n)}
-                          className={`min-w-[2.75rem] px-3 py-2.5 rounded-xl border-2 font-bold text-sm transition-all ${
-                            passengers === n
-                              ? "bg-primary text-white border-primary shadow-md"
-                              : "bg-card text-muted-foreground border-border hover:border-primary/50"
-                          }`}
-                        >
-                          {n}
-                        </button>
-                      ))}
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="passengers" className="font-semibold text-sm">Passengers</Label>
+                      <select
+                        id="passengers"
+                        value={passengers}
+                        onChange={(e) => setPassengers(parseInt(e.target.value, 10) || 1)}
+                        className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                          <option key={n} value={n}>
+                            {n} {n === 1 ? "passenger" : "passengers"}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        {passengers >= 5 ? "5+ passengers require a van." : "Any vehicle type for 1–4 passengers."}
+                      </p>
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      {passengers >= 5
-                        ? "5 or more passengers require a van (Van tariff and van vehicle)."
-                        : "1–4 passengers use the Standard tariff with any vehicle type."}
-                    </p>
-                  </div>
-                )}
-
-                {selectedService === "taxi" && (
-                  <div className="space-y-3">
-                    <Label className="font-bold text-sm">Vehicle type</Label>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {VEHICLE_TYPES.map((vt) => {
-                        const lockedVan = passengers >= 5 && vt !== "Van";
-                        return (
-                        <button
-                          key={vt}
-                          type="button"
-                          disabled={lockedVan}
-                          onClick={() => {
-                            if (passengers >= 5 && vt !== "Van") return;
-                            setVehicleType(vt);
-                          }}
-                          className={`px-3 py-3 rounded-xl border-2 font-bold text-sm transition-all ${
-                            vehicleType === vt
-                              ? "bg-primary text-white border-primary shadow-md"
-                              : lockedVan
-                                ? "bg-muted/40 text-muted-foreground/50 border-border cursor-not-allowed"
-                                : "bg-card text-muted-foreground border-border hover:border-primary/50"
-                          }`}
-                        >
-                          {VEHICLE_LABELS[vt]}
-                        </button>
-                        );
-                      })}
+                    <div className="space-y-2">
+                      <Label htmlFor="vehicleType" className="font-semibold text-sm">Vehicle</Label>
+                      <select
+                        id="vehicleType"
+                        value={passengers >= 5 ? "Van" : vehicleType}
+                        disabled={passengers >= 5}
+                        onChange={(e) => setVehicleType(e.target.value as VehicleTypeOption)}
+                        className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                      >
+                        {VEHICLE_TYPES.map((vt) => (
+                          <option key={vt} value={vt} disabled={passengers >= 5 && vt !== "Van"}>
+                            {VEHICLE_LABELS[vt]}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      {passengers >= 5
-                        ? "Van is required for 5+ passengers."
-                        : "Accessible / WAV is required for wheelchair hoist trips. Dispatch will match this type when offering drivers."}
-                    </p>
                   </div>
                 )}
 
                 <div className="space-y-2">
-                  <Label htmlFor="notes" className="font-bold text-sm">Pickup notes for the driver</Label>
+                  <Label htmlFor="notes" className="font-semibold text-sm">Pickup notes</Label>
                   <Textarea
                     id="notes"
                     name="notes"
                     value={form.notes}
                     onChange={handleChange}
-                    placeholder="Gate code, entrance, landmark, or other instructions for the driver…"
-                    rows={3}
+                    placeholder="Gate code, entrance, landmark…"
+                    rows={2}
                     className="rounded-xl resize-none"
                   />
-                  <p className="text-xs text-muted-foreground">One-way note — the driver can read this on the job; you cannot change it after a driver is assigned.</p>
                 </div>
 
-                {/* Payment method — selected here, locked on confirm step */}
-                <div className="space-y-4 pt-2 border-t border-border">
-                  <h2 className="text-sm font-extrabold uppercase tracking-widest text-muted-foreground">
-                    How would you like to pay?
-                  </h2>
+                {/* Payment method */}
+                <div className="space-y-3 pt-2 border-t border-border/80">
+                  <h2 className="text-sm font-semibold text-foreground">Payment</h2>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                     {availablePaymentMethods.map((pm) => (
                       <button
@@ -1447,14 +1354,14 @@ export default function BookPage() {
                         onClick={() => {
                           setPaymentMethod(pm.value);
                           setPaymentRef("");
-                          setVerified(false);
+                          setVerified(pm.value === "cash" || pm.value === "card");
                           setVerifyError(null);
                           setError(null);
                         }}
-                        className={`flex items-center gap-2 px-3 py-3 rounded-xl border-2 font-bold text-sm transition-all ${
+                        className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border font-medium text-sm transition-colors ${
                           paymentMethod === pm.value
-                            ? "bg-primary text-white border-primary shadow-md"
-                            : "bg-card text-muted-foreground border-border hover:border-primary/50"
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-background text-muted-foreground border-border hover:border-foreground/30"
                         }`}
                       >
                         {pm.icon}
@@ -1463,7 +1370,11 @@ export default function BookPage() {
                     ))}
                   </div>
 
-                  {paymentMethod !== "card" && (() => {
+                  {paymentMethod === "cash" && (
+                    <p className="text-xs text-muted-foreground">{PAYMENT_METHODS.find((m) => m.value === "cash")?.help}</p>
+                  )}
+
+                  {paymentMethod !== "card" && paymentMethod !== "cash" && (() => {
                     const pm = availablePaymentMethods.find((m) => m.value === paymentMethod)!;
                     return (
                       <div className="space-y-2">
@@ -1473,14 +1384,14 @@ export default function BookPage() {
                             value={paymentRef}
                             onChange={(e) => setPaymentRef(e.target.value)}
                             placeholder={pm.placeholder}
-                            className="rounded-xl h-12 pr-10"
+                            className="rounded-xl h-11 pr-10"
                             autoComplete="off"
                           />
                           {verifying && (
-                            <Loader2 className="absolute right-3 top-3.5 w-5 h-5 animate-spin text-muted-foreground pointer-events-none" />
+                            <Loader2 className="absolute right-3 top-3 w-5 h-5 animate-spin text-muted-foreground pointer-events-none" />
                           )}
                           {!verifying && verified && (
-                            <CheckCircle2 className="absolute right-3 top-3.5 w-5 h-5 text-emerald-600 pointer-events-none" />
+                            <CheckCircle2 className="absolute right-3 top-3 w-5 h-5 text-emerald-600 pointer-events-none" />
                           )}
                         </div>
                         {!verifying && verifyError && (
@@ -1490,7 +1401,7 @@ export default function BookPage() {
                         )}
                         {!verifying && verified && (
                           <p className="text-sm text-emerald-700 font-medium flex items-center gap-1.5">
-                            <CheckCircle2 className="w-4 h-4 shrink-0" /> Verified — you're good to book
+                            <CheckCircle2 className="w-4 h-4 shrink-0" /> Verified
                           </p>
                         )}
                       </div>
@@ -1500,13 +1411,10 @@ export default function BookPage() {
                   {paymentMethod === "card" && (
                     <>
                       <p className="text-xs text-muted-foreground">{PAYMENT_METHODS[0].help}</p>
-                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 flex items-start gap-2">
+                      <div className="rounded-xl border border-amber-200/80 bg-amber-50/80 p-3 text-xs text-amber-950 flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
                         <span>
-                          <strong>Cancellation policy:</strong> if you cancel before a driver is assigned,
-                          the fare is added to your <strong>BookaWaka wallet</strong> as credit (linked to your phone number)
-                          — not refunded to your card. You can spend wallet credit on your next booking.
-                          If a driver has already been assigned, no credit is issued.
+                          Cancel before a driver is assigned and the fare goes to your BookaWaka wallet (phone-linked credit), not back to your card. No credit after a driver is assigned.
                         </span>
                       </div>
                     </>
@@ -1519,8 +1427,8 @@ export default function BookPage() {
                   </div>
                 )}
 
-                <Button type="submit" size="lg" className="w-full bg-primary text-primary-foreground hover:bg-primary/90 rounded-full h-14 font-extrabold text-base shadow-lg">
-                  Review Booking <ChevronRight className="w-5 h-5 ml-2" />
+                <Button type="submit" size="lg" className="w-full bg-primary text-primary-foreground hover:bg-primary/90 rounded-full h-12 font-semibold text-base">
+                  Review booking <ChevronRight className="w-5 h-5 ml-2" />
                 </Button>
               </form>
                 </div>
@@ -1553,7 +1461,7 @@ export default function BookPage() {
                 <ActiveBookingAlert conflict={activeBooking} />
               )}
 
-              <div className="bg-card border border-border rounded-[1.5rem] p-6 md:p-8 shadow-xl space-y-4 mb-6">
+              <div className="bg-card border border-border/80 rounded-2xl p-6 md:p-8 shadow-sm space-y-4 mb-6">
                 <Row label="Company" value={selectedCompany?.name ?? ""} />
                 {selectedCompany?.operatingHours && (
                   <Row label="Operating hours" value={selectedCompany.operatingHours} />
@@ -1596,7 +1504,7 @@ export default function BookPage() {
                 {hasAmount && cartItems.length === 0 && (
                   <>
                     <hr className="border-border" />
-                    <Row label="Amount" value={`NZD $${fareTotal.toFixed(2)}`} />
+                    <Row label="Trip price" value={`NZD $${fareTotal.toFixed(2)}`} />
                     {walletActive && (
                       <>
                         <Row label="Wallet credit" value={`- $${walletApplied.toFixed(2)}`} />

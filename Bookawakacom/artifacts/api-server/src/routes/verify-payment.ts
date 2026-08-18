@@ -11,12 +11,22 @@ verifyPaymentRouter.get("/verify-payment", async (req, res) => {
     estimatedFare?: string;
   };
 
-  if (!cid || !method || !reference) {
-    res.status(400).json({ valid: false, message: "cid, method, and reference are required" });
+  if (!cid || !method) {
+    res.status(400).json({ valid: false, message: "cid and method are required" });
     return;
   }
 
-  const ref = (reference as string).trim();
+  // Cash / card need no reference lookup.
+  if (method === "cash") {
+    res.json({ valid: true, message: "Cash payment — pay the driver at the end of the trip." });
+    return;
+  }
+  if (method === "card") {
+    res.json({ valid: true, message: "Card payment is collected at checkout." });
+    return;
+  }
+
+  const ref = (reference as string | undefined)?.trim() ?? "";
   if (!ref) {
     res.json({ valid: false, message: "Reference number cannot be empty." });
     return;

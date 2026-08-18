@@ -57,32 +57,60 @@ function cleanDisplayName(displayName: string): string {
     .trim();
 }
 
+/** Nominatim often returns "Invercargill City" — passengers expect "Invercargill". */
+function tidyPlaceName(name: string): string {
+  return name
+    .replace(/\bInvercargill City\b/gi, "Invercargill")
+    .replace(/\bCity of Invercargill\b/gi, "Invercargill")
+    .trim();
+}
+
+/**
+ * NZ street line: unit/street-number + road.
+ * Nominatim sometimes returns house_number="1" and road="88 Dee Street" for unit 1 / 88 Dee —
+ * join as "1/88 Dee Street" instead of the garbled "1 88 Dee Street".
+ */
 function formatStreetLine(addr?: NominatimAddress): string {
   if (!addr) return "";
-  const parts: string[] = [];
-  if (addr.house_number) parts.push(addr.house_number);
-  if (addr.road) parts.push(addr.road);
-  return parts.join(" ").trim();
+  const num = String(addr.house_number || "").trim();
+  const road = String(addr.road || "").trim();
+  if (!num && !road) return "";
+  if (!num) return road;
+  if (!road) return num;
+  if (road.toLowerCase().startsWith(num.toLowerCase() + " ") || road.toLowerCase() === num.toLowerCase()) {
+    return road;
+  }
+  // Already NZ unit form in house_number (e.g. 9/6)
+  if (num.includes("/")) {
+    return `${num} ${road}`.replace(/\s+/g, " ").trim();
+  }
+  const roadNumMatch = road.match(/^(\d+[A-Za-z]?)\s+(.+)$/);
+  if (roadNumMatch && /^\d+[A-Za-z]?$/.test(num)) {
+    return `${num}/${roadNumMatch[1]} ${roadNumMatch[2]}`.replace(/\s+/g, " ").trim();
+  }
+  return `${num} ${road}`.replace(/\s+/g, " ").trim();
 }
 
 function pickLocality(addr?: NominatimAddress): string {
   if (!addr) return "";
-  return (
+  return tidyPlaceName(
     addr.suburb ||
-    addr.neighbourhood ||
-    addr.quarter ||
-    addr.city ||
-    addr.town ||
-    addr.village ||
-    addr.municipality ||
-    ""
-  ).trim();
+      addr.neighbourhood ||
+      addr.quarter ||
+      addr.city ||
+      addr.town ||
+      addr.village ||
+      addr.municipality ||
+      "",
+  );
 }
 
 function pickCity(addr?: NominatimAddress): string {
   if (!addr) return "";
   const suburb = pickLocality(addr);
-  const city = (addr.city || addr.town || addr.village || addr.municipality || "").trim();
+  const city = tidyPlaceName(
+    (addr.city || addr.town || addr.village || addr.municipality || "").trim(),
+  );
   return city && city.toLowerCase() !== suburb.toLowerCase() ? city : "";
 }
 
@@ -91,7 +119,7 @@ export function getPlaceTitle(r: NominatimResult): string {
   const addr = r.address;
   const street = formatStreetLine(addr);
 
-  if (r.name?.trim()) return r.name.trim();
+  if (r.name?.trim()) return tidyPlaceName(r.name.trim());
 
   const poiName =
     addr?.amenity ||
@@ -101,12 +129,15 @@ export function getPlaceTitle(r: NominatimResult): string {
     addr?.office ||
     addr?.historic ||
     (addr?.building && addr.building !== "yes" ? addr.building : "");
-  if (poiName?.trim()) return poiName.trim();
+  if (poiName?.trim()) return tidyPlaceName(poiName.trim());
 
   if (street) return street;
 
-  const parts = cleanDisplayName(r.display_name).split(",").map((p) => p.trim()).filter(Boolean);
-  return parts[0] ?? r.display_name;
+  const parts = tidyPlaceName(cleanDisplayName(r.display_name))
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts[0] ?? tidyPlaceName(r.display_name);
 }
 
 /** Secondary line: street (when title is a business), suburb, city, postcode. */
@@ -127,7 +158,7 @@ export function getPlaceSubtitle(r: NominatimResult): string {
     parts.push(street);
   }
   if (suburb && !parts.some((p) => p.toLowerCase() === suburb.toLowerCase())) {
-    parts.push(suburb);
+    parts.push(tidyPlaceName(suburb));
   }
   if (city && !parts.some((p) => p.toLowerCase() === city.toLowerCase())) {
     parts.push(city);
@@ -149,12 +180,14 @@ export function getPlaceSubtitle(r: NominatimResult): string {
 
 /** Value stored in the input after the user picks a suggestion. */
 export function formatSelectedAddress(r: NominatimResult): string {
-  const title = getPlaceTitle(r);
-  const subtitle = getPlaceSubtitle(r);
+  const title = tidyPlaceName(getPlaceTitle(r));
+  const subtitle = tidyPlaceName(getPlaceSubtitle(r));
   if (subtitle && subtitle.toLowerCase() !== title.toLowerCase()) {
-    return `${title}, ${subtitle}`;
+    // Avoid "Street, Street, Suburb" duplication
+    const combined = `${title}, ${subtitle}`.replace(/\s+,/g, ",").replace(/,\s*,/g, ",");
+    return tidyPlaceName(combined);
   }
-  return title || cleanDisplayName(r.display_name);
+  return title || tidyPlaceName(cleanDisplayName(r.display_name));
 }
 
 /** Client-side URL → proxied to Nominatim on the API server. */
