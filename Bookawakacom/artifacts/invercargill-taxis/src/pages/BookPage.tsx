@@ -1561,8 +1561,10 @@ export default function BookPage() {
                 <Row label="Service" value={SERVICE_LABELS[selectedService]?.label ?? selectedService} />
                 {selectedService === "food" && selectedRestaurant && <Row label="Restaurant" value={selectedRestaurant.name} />}
                 {selectedService === "taxi" && (
-                  <Row label="Passengers" value={String(passengers)} />
-                  <Row label="Vehicle" value={VEHICLE_LABELS[passengers >= 5 ? "Van" : vehicleType]} />
+                  <>
+                    <Row label="Passengers" value={String(passengers)} />
+                    <Row label="Vehicle" value={VEHICLE_LABELS[passengers >= 5 ? "Van" : vehicleType]} />
+                  </>
                 )}
                 <Row label="Passenger" value={form.passengerName} />
                 <Row label="Phone" value={form.passengerPhone} />
