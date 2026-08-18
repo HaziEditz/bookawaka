@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getDatabase } from "../lib/firebase";
+import { logger } from "../lib/logger";
 
 const jobRouter = Router();
 
@@ -14,19 +15,103 @@ function todayKey(): string {
   return `${yy}${mm}${dd}`;
 }
 
+/**
+ * Atomically bump jobCounters/{companyId}/{dateKey}.
+ * Counter may be a bare number (legacy) or `{ count }` — both supported.
+ */
 async function nextSequence(companyId: string, dateKey: string): Promise<number> {
   const db = getDatabase();
   const ref = db.ref(`jobCounters/${companyId}/${dateKey}`);
   const result = await ref.transaction((current: unknown) => {
-    // current may be null (first write) or a number. Guard against any
-    // unexpected type — the transaction callback can receive a speculative
-    // non-null value on the first pass before the server round-trip.
-    const n = current == null ? 0 : Number(current);
-    return (isFinite(n) ? n : 0) + 1;
+    if (current == null) return 1;
+    if (typeof current === "number" && isFinite(current)) return current + 1;
+    if (current && typeof current === "object" && isFinite(Number((current as { count?: unknown }).count))) {
+      return { ...(current as object), count: Number((current as { count: number }).count) + 1, updatedAt: Date.now() };
+    }
+    return 1;
   });
   const committed = result.snapshot.val();
-  // Fall back to 1 if the transaction was aborted or the value is unusable.
-  return typeof committed === "number" && isFinite(committed) ? committed : 1;
+  if (typeof committed === "number" && isFinite(committed)) return committed;
+  if (committed && typeof committed === "object" && isFinite(Number((committed as { count?: unknown }).count))) {
+    return Number((committed as { count: number }).count);
+  }
+  return 1;
+}
+
+/**
+ * Seed counter to at least max sequence already present in allbookings for today's
+ * prefix — same belt-and-braces as the July 2026 ghost-job fix / SA generateJobId.
+ */
+async function seedCounterFromAllbookings(companyId: string, dateKey: string, prefix: string): Promise<void> {
+  const db = getDatabase();
+  let maxSeq = 0;
+  try {
+    const snap = await db.ref(`allbookings/${companyId}`).get();
+    if (!snap.exists()) return;
+    const all = snap.val() as Record<string, unknown>;
+    for (const id of Object.keys(all || {})) {
+      if (id.startsWith(prefix) && id.length > prefix.length) {
+        const seqStr = id.slice(prefix.length);
+        if (/^\d+$/.test(seqStr)) {
+          const n = parseInt(seqStr, 10);
+          if (n > maxSeq) maxSeq = n;
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err, companyId }, "job/create: allbookings seed scan failed");
+    return;
+  }
+  if (maxSeq <= 0) return;
+
+  const ref = db.ref(`jobCounters/${companyId}/${dateKey}`);
+  await ref.transaction((current: unknown) => {
+    let cur = 0;
+    if (typeof current === "number" && isFinite(current)) cur = current;
+    else if (current && typeof current === "object") cur = Number((current as { count?: unknown }).count) || 0;
+    if (cur >= maxSeq) return; // abort — already ahead (Firebase treats undefined as abort)
+    return maxSeq;
+  });
+}
+
+/**
+ * Allocate a job ID that is confirmed absent from allbookings + pendingjobs.
+ * Mirrors INVT allocateCompanyJobId: never return a ghost Completed/Cancelled ID.
+ */
+async function allocateFreeWebJobId(companyId: string): Promise<string> {
+  const db = getDatabase();
+  const dateKey = todayKey();
+  const companySuffix = companyId.slice(-3);
+  const prefix = `${companySuffix}${dateKey}`;
+  await seedCounterFromAllbookings(companyId, dateKey, prefix);
+
+  const maxAttempts = 500;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const seq = await nextSequence(companyId, dateKey);
+    const jobId = `${prefix}${seq}`;
+
+    const [abSnap, pendSnap] = await Promise.all([
+      db.ref(`allbookings/${companyId}/${jobId}`).get(),
+      db.ref(`pendingjobs/${companyId}/${jobId}`).get(),
+    ]);
+
+    if (abSnap.exists() || pendSnap.exists()) {
+      logger.info(
+        { companyId, jobId, attempt: attempt + 1, inAllbookings: abSnap.exists(), inPending: pendSnap.exists() },
+        "job/create: ghost/live ID collision — jumping seq +40"
+      );
+      // Dense ghost regions: burn ahead so we spend budget finding free IDs.
+      for (let j = 0; j < 39; j++) await nextSequence(companyId, dateKey);
+      continue;
+    }
+
+    if (attempt > 0) {
+      logger.info({ companyId, jobId, attempts: attempt + 1 }, "job/create: allocated after collision skips");
+    }
+    return jobId;
+  }
+
+  throw new Error(`exhausted ${maxAttempts} free job ID allocation attempts for company ${companyId}`);
 }
 
 jobRouter.post("/job/create", async (req, res) => {
@@ -62,12 +147,7 @@ jobRouter.post("/job/create", async (req, res) => {
   }
 
   try {
-    const dateKey = todayKey();
-    const seq = await nextSequence(companyId, dateKey);
-    // SA convention: ID = last 3 digits of companyId + yymmdd + sequence.
-    // e.g. company "620611" + 2026-05-09 + seq 5 → "6112605095".
-    const companySuffix = companyId.slice(-3);
-    const jobId = `${companySuffix}${dateKey}${seq}`;
+    const jobId = await allocateFreeWebJobId(companyId);
     const createdAt = Math.floor(Date.now() / 1000);
 
     const db = getDatabase();
