@@ -138,6 +138,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     amount,
     paymentMethod,
     vehicleType,
+    passengers,
     pickLat,
     pickLng,
     dropLat,
@@ -164,9 +165,10 @@ bookingsRouter.post("/bookings", async (req, res) => {
     dropAddress?: string;
     scheduledFor?: string;
     vehicleType?: string;
+    passengers?: number;
     notes?: string;
     amount?: number;
-    paymentMethod?: "card" | "account" | "acc" | "tm" | "giftcard";
+    paymentMethod?: "card" | "account" | "acc" | "tm" | "giftcard" | "cash";
     pickLat?: number;
     pickLng?: number;
     dropLat?: number;
@@ -328,10 +330,27 @@ bookingsRouter.post("/bookings", async (req, res) => {
   const isCard = effectiveMethod === "card";
   const isWallet = effectiveMethod === "wallet";
   const isAccount = effectiveMethod === "account" || effectiveMethod === "acc";
-  // Web booking page never offers cash — kept false for SA report parity.
-  const isCash = false;
+  const isCash = effectiveMethod === "cash";
   const pickLatLngStr = `${resolvedPick.lat},${resolvedPick.lng}`;
   const dropLatLngStr = `${resolvedDrop.lat},${resolvedDrop.lng}`;
+
+  // Fixed price when pickup + dropoff known and a fare was pre-calculated at booking.
+  // Driver app treats TarriffId === '-1' as fixed (no live meter).
+  const hasDropoff =
+    !!(dropAddress && String(dropAddress).trim()) &&
+    (resolvedDrop.lat !== 0 || resolvedDrop.lng !== 0 || !!(dropAddress && String(dropAddress).trim()));
+  const isFixedPrice = fareNum > 0 && hasDropoff;
+
+  const paxCount = (() => {
+    const n = parseInt(String(passengers ?? ""), 10);
+    if (!isNaN(n) && n >= 1) return Math.min(n, 20);
+    return 1;
+  })();
+  // 5+ passengers force Van vehicle type for dispatch eligibility.
+  let resolvedVehicleType = vehicleType ? String(vehicleType).trim() : "";
+  if (paxCount >= 5) {
+    resolvedVehicleType = "Van";
+  }
 
   const booking = {
     BookingId: bookingId,
@@ -351,6 +370,17 @@ bookingsRouter.post("/bookings", async (req, res) => {
     DropAddress: dropAddress,
     dropAddress, // lowercase alias
     Fare: fare,
+    EstimatedFare: fare,
+    ...(isFixedPrice
+      ? {
+          TarriffId: "-1",
+          TariffId: "-1",
+          TarriffType: "Fixed",
+          TariffType: "Fixed",
+          CustomeRate: fare,
+          isFixedPrice: true,
+        }
+      : {}),
     Info: notes ?? "",
     PassengerEmail: passengerEmail ?? "",
     PassengerName: passengerName,
@@ -358,6 +388,9 @@ bookingsRouter.post("/bookings", async (req, res) => {
     passengerPhone: normalizedPhone, // lowercase — SA driver app reads this for rating linkage
     PhoneNo: normalizedPhone, // SA legacy field name
     phone: normalizedPhone, // lowercase alias used by some SA queries
+    Passengers: paxCount,
+    PassengersNo: paxCount,
+    passengers: paxCount,
     PickAddress: pickAddress,
     pickAddress, // lowercase alias
     PickLatLng: pickLatLngStr,
@@ -378,8 +411,8 @@ bookingsRouter.post("/bookings", async (req, res) => {
     dispatcherOnly: false,
     // Vehicle type — same labels as passenger app (Sedan/SUV/Van/Luxury/Electric/Wheelchair).
     // Auto-dispatch filters on VehicleType via _driverEligibleForJob.
-    ...(vehicleType
-      ? { VehicleType: String(vehicleType).trim(), vehicleType: String(vehicleType).trim() }
+    ...(resolvedVehicleType
+      ? { VehicleType: resolvedVehicleType, vehicleType: resolvedVehicleType }
       : {}),
     // Payment fields — SA reports read PascalCase + boolean flags
     paymentMethod: effectiveMethod,

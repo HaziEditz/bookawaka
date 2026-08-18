@@ -174,7 +174,7 @@ const SERVICE_LABELS: Record<string, { label: string; icon: React.ReactNode; des
 
 const STEPS = ["Company", "Service", "Details", "Confirm"];
 
-type PaymentMethod = "card" | "account" | "acc" | "tm" | "giftcard";
+type PaymentMethod = "card" | "account" | "acc" | "tm" | "giftcard" | "cash";
 
 const PAYMENT_METHODS: Array<{
   value: PaymentMethod;
@@ -189,6 +189,13 @@ const PAYMENT_METHODS: Array<{
     icon: <CreditCard className="w-4 h-4" />,
     placeholder: "",
     help: "Secure card payment via Stripe. An estimated fare amount is required.",
+  },
+  {
+    value: "cash",
+    label: "Cash",
+    icon: <DollarSign className="w-4 h-4" />,
+    placeholder: "",
+    help: "Pay the driver in cash at the end of the trip. Available when the operator enables cash bookings.",
   },
   {
     value: "account",
@@ -249,6 +256,7 @@ export default function BookPage() {
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("card");
   const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Sedan");
+  const [passengers, setPassengers] = useState(1);
   const [paymentRef, setPaymentRef] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState(false);
@@ -498,16 +506,34 @@ export default function BookPage() {
     }, 600);
   }, [paymentRef, paymentMethod, selectedCompany, fareEstimate]);
 
-  const availablePaymentMethods = PAYMENT_METHODS.filter(
-    (pm) => pm.value !== "card" || paymentConfig?.cardEnabled === true || paymentConfig == null
-  );
+  const availablePaymentMethods = PAYMENT_METHODS.filter((pm) => {
+    if (pm.value === "card") {
+      return paymentConfig?.cardEnabled === true || paymentConfig == null;
+    }
+    if (pm.value === "cash") {
+      return paymentConfig?.effectiveCash === true;
+    }
+    return true;
+  });
 
   useEffect(() => {
     if (paymentConfig?.cardEnabled === false && paymentMethod === "card") {
-      const fallback = PAYMENT_METHODS.find((pm) => pm.value !== "card");
+      const fallback = PAYMENT_METHODS.find(
+        (pm) => pm.value !== "card" && (pm.value !== "cash" || paymentConfig?.effectiveCash === true),
+      );
       if (fallback) setPaymentMethod(fallback.value);
     }
+    if (paymentConfig && paymentConfig.effectiveCash !== true && paymentMethod === "cash") {
+      setPaymentMethod(paymentConfig.cardEnabled === false ? "account" : "card");
+    }
   }, [paymentConfig, paymentMethod]);
+
+  // 5+ passengers require Van tariff + van vehicle.
+  useEffect(() => {
+    if (passengers >= 5 && vehicleType !== "Van") {
+      setVehicleType("Van");
+    }
+  }, [passengers, vehicleType]);
 
   // Auto-fetch fare estimate. Works in two modes:
   //   1. Coords already resolved (user picked from autocomplete suggestions) → fire immediately
@@ -565,8 +591,18 @@ export default function BookPage() {
           return;
         }
 
+        const purpose =
+          paymentMethod === "tm"
+            ? "Total Mobility"
+            : passengers >= 5 || vehicleType === "Van" || vehicleType === "Wheelchair"
+              ? "Van"
+              : "Standard";
+        const atParam =
+          bookingType === "scheduled" && form.scheduledFor
+            ? `&at=${encodeURIComponent(new Date(form.scheduledFor).toISOString())}`
+            : "";
         const r = await fetch(
-          `${import.meta.env.BASE_URL}api/fare-estimate?cid=${selectedCompany.id}&fromLat=${pLat}&fromLng=${pLng}&toLat=${dLat}&toLng=${dLng}`
+          `${import.meta.env.BASE_URL}api/fare-estimate?cid=${selectedCompany.id}&fromLat=${pLat}&fromLng=${pLng}&toLat=${dLat}&toLng=${dLng}&purpose=${encodeURIComponent(purpose)}&passengers=${passengers}&vehicleType=${encodeURIComponent(vehicleType)}${atParam}`,
         );
         const d = await r.json();
         if (cancelled) return;
@@ -587,7 +623,7 @@ export default function BookPage() {
     const delay = pickReady && dropReady ? 0 : 700;
     const t = setTimeout(run, delay);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [pickCoords, dropCoords, form.pickAddress, form.dropAddress, selectedCompany, selectedService]);
+  }, [pickCoords, dropCoords, form.pickAddress, form.dropAddress, form.scheduledFor, selectedCompany, selectedService, passengers, vehicleType, paymentMethod, bookingType]);
 
   const reserveJobId = async (): Promise<string> => {
     const res = await fetch(`${import.meta.env.BASE_URL}api/job/create`, {
@@ -643,7 +679,8 @@ export default function BookPage() {
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
         paymentMethod: method,
-        vehicleType: selectedService === "taxi" ? vehicleType : undefined,
+        vehicleType: selectedService === "taxi" ? (passengers >= 5 ? "Van" : vehicleType) : undefined,
+        passengers: selectedService === "taxi" ? passengers : undefined,
         pickLat: pickCoords?.lat ?? 0,
         pickLng: pickCoords?.lng ?? 0,
         dropLat: dropCoords?.lat ?? 0,
@@ -1197,9 +1234,9 @@ export default function BookPage() {
                       <>
                         <DollarSign className="w-4 h-4 text-emerald-600 shrink-0" />
                         <div>
-                          <span className="text-sm font-bold text-emerald-800">Estimated fare: ~${fareEstimate.estimate.toFixed(2)} NZD</span>
+                          <span className="text-sm font-bold text-emerald-800">Trip price: ${fareEstimate.estimate.toFixed(2)} NZD</span>
                           <span className="text-xs text-emerald-700 ml-2">({fareEstimate.distanceKm} km · {fareEstimate.tariff})</span>
-                          <p className="text-xs text-emerald-700 mt-0.5">Final fare is set by the driver meter.</p>
+                          <p className="text-xs text-emerald-700 mt-0.5">Fixed price for this trip — the driver will not run a live meter.</p>
                         </div>
                       </>
                     ) : null}
@@ -1290,7 +1327,7 @@ export default function BookPage() {
                         </div>
                       ))}
                     </div>
-                    <p className="text-xs text-muted-foreground">Rates set by the operator. Actual fare depends on distance and time.</p>
+                    <p className="text-xs text-muted-foreground">Rates set by the operator. Trip price is calculated from the matching Purpose + time-of-day tariff.</p>
                   </div>
                 )}
 
@@ -1315,32 +1352,70 @@ export default function BookPage() {
                   />
                   <p className="text-xs text-muted-foreground">
                     {fareEstimate
-                      ? `Estimated from ${fareEstimate.tariff} tariff (${fareEstimate.distanceKm} km). You can adjust if needed. Required to pay by card.`
+                      ? `Fixed price from ${fareEstimate.tariff} (${fareEstimate.distanceKm} km). You can adjust if needed. Required to pay by card.`
                       : "Auto-filled once both addresses are confirmed. Required to pay by card."}
                   </p>
                 </div>
 
                 {selectedService === "taxi" && (
                   <div className="space-y-3">
-                    <Label className="font-bold text-sm">Vehicle type</Label>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {VEHICLE_TYPES.map((vt) => (
+                    <Label className="font-bold text-sm">Passengers</Label>
+                    <div className="flex gap-2 flex-wrap">
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
                         <button
-                          key={vt}
+                          key={n}
                           type="button"
-                          onClick={() => setVehicleType(vt)}
-                          className={`px-3 py-3 rounded-xl border-2 font-bold text-sm transition-all ${
-                            vehicleType === vt
+                          onClick={() => setPassengers(n)}
+                          className={`min-w-[2.75rem] px-3 py-2.5 rounded-xl border-2 font-bold text-sm transition-all ${
+                            passengers === n
                               ? "bg-primary text-white border-primary shadow-md"
                               : "bg-card text-muted-foreground border-border hover:border-primary/50"
                           }`}
                         >
-                          {VEHICLE_LABELS[vt]}
+                          {n}
                         </button>
                       ))}
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Accessible / WAV is required for wheelchair hoist trips. Dispatch will match this type when offering drivers.
+                      {passengers >= 5
+                        ? "5 or more passengers require a van (Van tariff and van vehicle)."
+                        : "1–4 passengers use the Standard tariff with any vehicle type."}
+                    </p>
+                  </div>
+                )}
+
+                {selectedService === "taxi" && (
+                  <div className="space-y-3">
+                    <Label className="font-bold text-sm">Vehicle type</Label>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {VEHICLE_TYPES.map((vt) => {
+                        const lockedVan = passengers >= 5 && vt !== "Van";
+                        return (
+                        <button
+                          key={vt}
+                          type="button"
+                          disabled={lockedVan}
+                          onClick={() => {
+                            if (passengers >= 5 && vt !== "Van") return;
+                            setVehicleType(vt);
+                          }}
+                          className={`px-3 py-3 rounded-xl border-2 font-bold text-sm transition-all ${
+                            vehicleType === vt
+                              ? "bg-primary text-white border-primary shadow-md"
+                              : lockedVan
+                                ? "bg-muted/40 text-muted-foreground/50 border-border cursor-not-allowed"
+                                : "bg-card text-muted-foreground border-border hover:border-primary/50"
+                          }`}
+                        >
+                          {VEHICLE_LABELS[vt]}
+                        </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {passengers >= 5
+                        ? "Van is required for 5+ passengers."
+                        : "Accessible / WAV is required for wheelchair hoist trips. Dispatch will match this type when offering drivers."}
                     </p>
                   </div>
                 )}
@@ -1486,7 +1561,8 @@ export default function BookPage() {
                 <Row label="Service" value={SERVICE_LABELS[selectedService]?.label ?? selectedService} />
                 {selectedService === "food" && selectedRestaurant && <Row label="Restaurant" value={selectedRestaurant.name} />}
                 {selectedService === "taxi" && (
-                  <Row label="Vehicle" value={VEHICLE_LABELS[vehicleType]} />
+                  <Row label="Passengers" value={String(passengers)} />
+                  <Row label="Vehicle" value={VEHICLE_LABELS[passengers >= 5 ? "Van" : vehicleType]} />
                 )}
                 <Row label="Passenger" value={form.passengerName} />
                 <Row label="Phone" value={form.passengerPhone} />
@@ -1865,6 +1941,8 @@ export default function BookPage() {
                     setSelectedService("");
                     setBookingType("now");
                     setForm({ passengerName: "", passengerPhone: "", passengerEmail: "", pickAddress: "", dropAddress: "", scheduledFor: "", notes: "", amount: "", notifyBefore: "30" });
+                    setPassengers(1);
+                    setVehicleType("Sedan");
                     setBookingId(null);
                     setWasScheduled(false);
                     setPaidByCard(false);
