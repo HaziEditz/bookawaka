@@ -32,11 +32,15 @@ companiesRouter.get("/companies", async (req, res) => {
     // Field is optional / often empty until companies configure hours.
     const settingsSnap = await db.ref("/companySettings").once("value");
     const settingsMap = (settingsSnap.val() as Record<string, any> | null) ?? {};
+    // Registration historically wrote contact email only to superClients.
+    const superSnap = await db.ref("/superClients").once("value");
+    const superMap = (superSnap.val() as Record<string, any> | null) ?? {};
 
     const companies = Object.entries(profiles)
       .filter(([, v]) => v && v.active !== false)
       .map(([id, v]) => {
         const settings = settingsMap[id] || {};
+        const superClient = superMap[id] || {};
         const hours =
           settings.operatingHours ??
           settings.operating_hours ??
@@ -51,7 +55,14 @@ companiesRouter.get("/companies", async (req, res) => {
           description: v.description ?? "",
           city: v.city ?? settings.city ?? "",
           country: v.country ?? "New Zealand",
-          email: v.email ?? settings.email ?? "",
+          email:
+            v.email ||
+            settings.email ||
+            v.contactEmail ||
+            settings.contactEmail ||
+            superClient.email ||
+            superClient.contactEmail ||
+            "",
           operatingHours: typeof hours === "string" ? hours : "",
         };
       });

@@ -167,6 +167,20 @@ export async function provisionCompanyPlan(
 
   writes.push(db.ref(`superClients/${cid}`).set(superClient));
 
+  // Website / MailerSend scheduled alerts read companyProfiles.email — keep in sync
+  // with the registration contact email (historically only written to superClients).
+  const profileEmail = String(email || "").trim();
+  if (profileEmail) {
+    writes.push(
+      db.ref(`companyProfiles/${cid}`).update({
+        email: profileEmail,
+        name: businessName,
+        contactEmail: profileEmail,
+        updatedAt: nowMs,
+      }),
+    );
+  }
+
   if (authUid) {
     writes.push(
       db.ref(`adminAccess/${cid}/${authUid}`).set(true),

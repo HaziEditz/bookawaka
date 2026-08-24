@@ -6,6 +6,8 @@ import { normalizeEmailKey } from "../lib/passengerKey";
 import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
 import { findActiveBooking, normalizePhoneKey } from "../lib/active-booking-guard";
 import { searchNzPlaces } from "../lib/geocode-search";
+import { estimateDispatchLeadMins } from "../lib/estimateDispatchLeadMins";
+import { resolveCompanyEmail } from "../lib/resolveCompanyEmail";
 
 const SA_DISPATCH_URL = "https://taxitime.co.nz/DataManager/Data.aspx";
 
@@ -406,8 +408,18 @@ bookingsRouter.post("/bookings", async (req, res) => {
     Prebook: isScheduled,
     IsPreBook: isScheduled,
     BookingType: isScheduled ? "Prebook" : "ASAP",
-    ...(isScheduled && notifyDispatchBeforeMinutes != null
-      ? { NotifyDispatchBeforeMinutes: notifyDispatchBeforeMinutes, NotifyDispatchAt: new Date(scheduledDate!.getTime() - notifyDispatchBeforeMinutes * 60 * 1000).toISOString() }
+    ...(isScheduled
+      ? (() => {
+          // Same estimate as INVT/_estimateDispatchLeadMins / passenger app — ignore client chips.
+          const leadMins = estimateDispatchLeadMins(resolvedPick.lat, resolvedPick.lng);
+          const notifyAt = new Date(scheduledDate!.getTime() - leadMins * 60 * 1000).toISOString();
+          return {
+            DispatchTimebefore: leadMins,
+            Dispatchbefore: leadMins,
+            NotifyDispatchBeforeMinutes: leadMins,
+            NotifyDispatchAt: notifyAt,
+          };
+        })()
       : {}),
     ServiceType: serviceType ?? "taxi",
     Status: status,
@@ -500,10 +512,8 @@ bookingsRouter.post("/bookings", async (req, res) => {
     // Arm the auto-dispatch timer for scheduled cash bookings so they appear in the
     // dispatcher's live queue at the right time without manual intervention.
     if (isScheduled && !isCardPayment) {
-      const notifyAtMs =
-        notifyDispatchBeforeMinutes != null
-          ? scheduledDate!.getTime() - notifyDispatchBeforeMinutes * 60 * 1000
-          : scheduledDate!.getTime();
+      const leadMins = Number(booking.NotifyDispatchBeforeMinutes ?? booking.DispatchTimebefore ?? 30) || 30;
+      const notifyAtMs = scheduledDate!.getTime() - leadMins * 60 * 1000;
       registerScheduledDispatch({
         companyId,
         bookingId,
@@ -625,19 +635,7 @@ async function sendBookingEmails({
   `;
 
   if (isScheduled) {
-    let resolvedCompanyEmail = companyEmail?.trim() ?? "";
-    if (companyId) {
-      try {
-        const db = getDatabase();
-        const snap = await db.ref(`companyProfiles/${companyId}/email`).once("value");
-        const fromFirebase = snap.val();
-        if (typeof fromFirebase === "string" && fromFirebase.trim()) {
-          resolvedCompanyEmail = fromFirebase.trim();
-        }
-      } catch (err) {
-        log?.warn({ err, companyId }, "Could not fetch company email from Firebase");
-      }
-    }
+    const resolvedCompanyEmail = await resolveCompanyEmail(companyId, companyEmail);
 
     if (resolvedCompanyEmail) {
       await sendMailerSendEmail({
@@ -653,6 +651,11 @@ async function sendBookingEmails({
         `,
         fromName: "BookaWaka Bookings",
       });
+    } else {
+      log?.warn(
+        { companyId, bookingId: booking.BookingId },
+        "Scheduled booking: no company email resolved (companyProfiles/superClients empty)",
+      );
     }
 
     if (passengerEmail) {
@@ -686,8 +689,9 @@ async function sendBookingEmails({
     </div>
   `;
 
+  const resolvedCompanyEmail = await resolveCompanyEmail(companyId, companyEmail);
   const companyRecipients: { email: string; name?: string }[] = [{ email: "info@bookawaka.com", name: "BookaWaka Admin" }];
-  if (companyEmail) companyRecipients.push({ email: companyEmail, name: companyName });
+  if (resolvedCompanyEmail) companyRecipients.push({ email: resolvedCompanyEmail, name: companyName });
 
   await sendMailerSendEmail({
     to: companyRecipients,

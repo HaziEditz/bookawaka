@@ -237,7 +237,6 @@ export default function BookPage() {
     scheduledFor: "",
     notes: "",
     amount: "",
-    notifyBefore: "30",
   });
 
   const [submitting, setSubmitting] = useState(false);
@@ -654,10 +653,6 @@ export default function BookPage() {
         scheduledFor:
           bookingType === "scheduled" && form.scheduledFor
             ? new Date(form.scheduledFor).toISOString()
-            : undefined,
-        notifyDispatchBeforeMinutes:
-          bookingType === "scheduled" && form.notifyBefore
-            ? parseInt(form.notifyBefore)
             : undefined,
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
@@ -1285,21 +1280,6 @@ export default function BookPage() {
                         className="rounded-xl h-11"
                       />
                       <p className="text-xs text-muted-foreground">At least 5 minutes from now.</p>
-                      <div>
-                        <p className="text-xs font-medium text-muted-foreground mb-2">Notify dispatch before pickup</p>
-                        <div className="flex gap-2 flex-wrap">
-                          {["15", "30", "45", "60"].map((m) => (
-                            <button
-                              key={m}
-                              type="button"
-                              onClick={() => setForm((prev) => ({ ...prev, notifyBefore: m }))}
-                              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${form.notifyBefore === m ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-foreground/30"}`}
-                            >
-                              {m} min
-                            </button>
-                          ))}
-                        </div>
-                      </div>
                     </div>
                   )}
                 </div>
@@ -1505,9 +1485,6 @@ export default function BookPage() {
                       : "Now (as soon as possible)"
                   }
                 />
-                {bookingType === "scheduled" && form.notifyBefore && (
-                  <Row label="Dispatch alert" value={`${form.notifyBefore} minutes before pickup`} />
-                )}
                 {form.notes && <Row label="Pickup notes" value={form.notes} />}
                 {cartItems.length > 0 && (
                   <>
@@ -1779,7 +1756,7 @@ export default function BookPage() {
               </h1>
               <p className="text-muted-foreground font-medium mb-2 max-w-sm mx-auto">
                 {wasScheduled
-                  ? <>Your ride with <strong>{selectedCompany?.name}</strong> has been scheduled for <strong>{new Date(form.scheduledFor).toLocaleString("en-NZ", { timeZone: "Pacific/Auckland", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</strong>. Dispatch will be alerted {form.notifyBefore} minutes before pickup.</>
+                  ? <>Your ride with <strong>{selectedCompany?.name}</strong> has been scheduled for <strong>{new Date(form.scheduledFor).toLocaleString("en-NZ", { timeZone: "Pacific/Auckland", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</strong>. Dispatch will be notified automatically before pickup.</>
                   : selectedService === "food"
                   ? <>Your order from <strong>{selectedRestaurant?.name}</strong> has been sent to <strong>{selectedCompany?.name}</strong>'s dispatch system.</>
                   : <>Your booking has been sent directly to <strong>{selectedCompany?.name}</strong>'s dispatch system.</>}
@@ -1867,7 +1844,7 @@ export default function BookPage() {
                     setSelectedCompany(null);
                     setSelectedService("");
                     setBookingType("now");
-                    setForm({ passengerName: "", passengerPhone: "", passengerEmail: "", pickAddress: "", dropAddress: "", scheduledFor: "", notes: "", amount: "", notifyBefore: "30" });
+                    setForm({ passengerName: "", passengerPhone: "", passengerEmail: "", pickAddress: "", dropAddress: "", scheduledFor: "", notes: "", amount: "" });
                     setPassengers(1);
                     setVehicleType("Any");
                     setBookingId(null);
