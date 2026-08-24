@@ -7,6 +7,7 @@ import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
 import { findActiveBooking, normalizePhoneKey } from "../lib/active-booking-guard";
 import { searchNzPlaces } from "../lib/geocode-search";
 import { estimateDispatchLeadMins } from "../lib/estimateDispatchLeadMins";
+import { resolveCompanyBaseLocation } from "../lib/resolveCompanyBaseLocation";
 import { resolveCompanyEmail } from "../lib/resolveCompanyEmail";
 
 const SA_DISPATCH_URL = "https://taxitime.co.nz/DataManager/Data.aspx";
@@ -409,9 +410,14 @@ bookingsRouter.post("/bookings", async (req, res) => {
     IsPreBook: isScheduled,
     BookingType: isScheduled ? "Prebook" : "ASAP",
     ...(isScheduled
-      ? (() => {
-          // Same estimate as INVT/_estimateDispatchLeadMins / passenger app — ignore client chips.
-          const leadMins = estimateDispatchLeadMins(resolvedPick.lat, resolvedPick.lng);
+      ? await (async () => {
+          // Same estimate as INVT/_estimateDispatchLeadMins — company base (not Auckland default).
+          const companyBase = await resolveCompanyBaseLocation(companyId);
+          const leadMins = estimateDispatchLeadMins(
+            resolvedPick.lat,
+            resolvedPick.lng,
+            companyBase,
+          );
           const notifyAt = new Date(scheduledDate!.getTime() - leadMins * 60 * 1000).toISOString();
           return {
             DispatchTimebefore: leadMins,
