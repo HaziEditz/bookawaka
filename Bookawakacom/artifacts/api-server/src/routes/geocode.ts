@@ -1,13 +1,13 @@
 import { Router } from "express";
-import { searchNzPlaces } from "../lib/geocode-search";
+import { GeocodeUpstreamError, geocodeProviderLabel, searchNzPlaces } from "../lib/geocode-search";
 
 const geocodeRouter = Router();
 
-// Proxy Nominatim searches so we can:
-//  1. Set a proper User-Agent (required by Nominatim ToS)
-//  2. Bias results toward New Zealand with a viewbox
-//  3. Boost business/POI name matches with a ", New Zealand" retry
-//  4. Avoid browser CORS/rate-limit issues
+// Proxy geocode searches so we can:
+//  1. Identify the app (User-Agent + Referer) per Nominatim policy
+//  2. Enforce app-wide ≤1 req/s + result caching
+//  3. Prefer LocationIQ when LOCATIONIQ_API_KEY is set (autocomplete-safe free tier)
+//  4. Surface real upstream errors instead of an empty suggestion list
 geocodeRouter.get("/geocode", async (req, res) => {
   const { q, countrycodes, viewbox, bounded, limit } = req.query as {
     q?: string;
@@ -34,10 +34,27 @@ geocodeRouter.get("/geocode", async (req, res) => {
       limit: safeLimit,
     });
     res.setHeader("Content-Type", "application/json");
+    res.setHeader("X-Geocode-Provider", geocodeProviderLabel());
     res.json(Array.isArray(data) ? data : []);
   } catch (err: any) {
+    if (err instanceof GeocodeUpstreamError) {
+      req.log.warn(
+        { err: err.message, status: err.status, provider: err.provider, q },
+        "GET /geocode upstream error",
+      );
+      res.status(503).json({
+        error: err.message,
+        code: "GEOCODE_UPSTREAM",
+        provider: err.provider,
+        status: err.status,
+      });
+      return;
+    }
     req.log.warn({ err }, "GET /geocode proxy error");
-    res.json([]);
+    res.status(503).json({
+      error: "Address lookup temporarily unavailable. Please try again.",
+      code: "GEOCODE_PROXY",
+    });
   }
 });
 
@@ -56,8 +73,10 @@ geocodeRouter.get("/geocode-test", async (req, res) => {
     const startedAt = Date.now();
     const upstream = await fetch(url.toString(), {
       headers: {
-        "User-Agent": "BookaWaka/1.0 (info@bookawaka.com)",
+        "User-Agent": "BookaWaka Booking Portal/1.0 (https://bookawaka.com; info@bookawaka.com)",
+        Referer: "https://bookawaka.com/",
         "Accept-Language": "en",
+        Accept: "application/json",
       },
       signal: AbortSignal.timeout(10000),
     });
@@ -76,6 +95,7 @@ geocodeRouter.get("/geocode-test", async (req, res) => {
       status: upstream.status,
       statusText: upstream.statusText,
       elapsedMs: Date.now() - startedAt,
+      hasLocationIqKey: !!(process.env.LOCATIONIQ_API_KEY || process.env.LOCATION_IQ_API_KEY),
       data,
     });
   } catch (err: any) {
@@ -85,6 +105,7 @@ geocodeRouter.get("/geocode-test", async (req, res) => {
       query,
       url: url.toString(),
       error: err.message ?? String(err),
+      hasLocationIqKey: !!(process.env.LOCATIONIQ_API_KEY || process.env.LOCATION_IQ_API_KEY),
     });
   }
 });

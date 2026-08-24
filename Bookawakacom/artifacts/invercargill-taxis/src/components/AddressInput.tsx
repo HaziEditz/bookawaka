@@ -34,9 +34,9 @@ interface NominatimResult {
   address?: NominatimAddress;
 }
 
+const SEARCH_TIMEOUT_MS = 8000;
+const SEARCH_DEBOUNCE_MS = 1000; // ≥1s — matches Nominatim absolute max when proxy uses OSM
 const MIN_SEARCH_LENGTH = 3;
-const SEARCH_TIMEOUT_MS = 5000;
-const SEARCH_DEBOUNCE_MS = 200;
 const ADDRESS_FOCUS_EVENT = "bookawaka-address-input-focus";
 
 /** Only one address field should show suggestions at a time (pickup vs drop-off). */
@@ -226,6 +226,7 @@ export default function AddressInput({
   const [open, setOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -239,6 +240,7 @@ export default function AddressInput({
       setResults([]);
       setOpen(false);
       setSearching(false);
+      setLookupError(null);
       return;
     }
 
@@ -247,19 +249,29 @@ export default function AddressInput({
     abortRef.current = controller;
     const timeoutId = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
     setSearching(true);
+    setLookupError(null);
 
     try {
       const res = await fetch(buildGeocodeSearchUrl(trimmed), {
         signal: controller.signal,
         headers: { "Accept-Language": "en" },
       });
-      if (!res.ok || latestQueryRef.current !== trimmed) {
-        if (latestQueryRef.current === trimmed) {
-          setResults([]);
-          setOpen(false);
+      if (latestQueryRef.current !== trimmed) return;
+
+      if (!res.ok) {
+        let message = "Address lookup temporarily unavailable. Please try again.";
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body?.error && typeof body.error === "string") message = body.error;
+        } catch {
+          /* keep default */
         }
+        setResults([]);
+        setOpen(false);
+        setLookupError(message);
         return;
       }
+
       const data: NominatimResult[] = await res.json();
       if (!Array.isArray(data) || latestQueryRef.current !== trimmed) {
         if (latestQueryRef.current === trimmed) {
@@ -270,10 +282,15 @@ export default function AddressInput({
       }
       setResults(data);
       setOpen(data.length > 0);
-    } catch {
-      if (latestQueryRef.current === trimmed) {
-        setResults([]);
-        setOpen(false);
+      setLookupError(data.length === 0 ? "No matching addresses found." : null);
+    } catch (err: any) {
+      if (latestQueryRef.current !== trimmed) return;
+      setResults([]);
+      setOpen(false);
+      if (err?.name === "AbortError") {
+        setLookupError("Address lookup timed out. Please try again.");
+      } else {
+        setLookupError("Address lookup failed. Please try again.");
       }
     } finally {
       clearTimeout(timeoutId);
@@ -292,14 +309,15 @@ export default function AddressInput({
         setResults([]);
         setOpen(false);
         setSearching(false);
+        setLookupError(null);
         return;
       }
 
       setSearching(true);
-      const delay = trimmed.length === MIN_SEARCH_LENGTH ? 0 : SEARCH_DEBOUNCE_MS;
+      setLookupError(null);
       debounceRef.current = setTimeout(() => {
         void runSearch(trimmed);
-      }, delay);
+      }, SEARCH_DEBOUNCE_MS);
     },
     [runSearch]
   );
@@ -319,6 +337,7 @@ export default function AddressInput({
     setResults([]);
     setOpen(false);
     setSearching(false);
+    setLookupError(null);
     setFocused(false);
     latestQueryRef.current = "";
   };
@@ -427,6 +446,11 @@ export default function AddressInput({
             );
           })}
         </div>
+      )}
+      {lookupError && !open && !searching && (
+        <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-400" role="status">
+          {lookupError}
+        </p>
       )}
     </div>
   );
