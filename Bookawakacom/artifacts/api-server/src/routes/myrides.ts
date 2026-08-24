@@ -481,7 +481,11 @@ myRidesRouter.post("/my-rides/:jobId/update", async (req, res) => {
 
     await db.ref().update(updates);
 
-    const merged = { ...booking, ...content, BookingId: booking.BookingId ?? jobId };
+    const merged: Record<string, any> = {
+      ...booking,
+      ...content,
+      BookingId: booking.BookingId ?? jobId,
+    };
 
     // Notify company + passenger on a real date/time change (not notes-only edits).
     if (scheduleChanged) {
