@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import AddressInput from "@/components/AddressInput";
 import BookingMapPanel from "@/components/BookingMapPanel";
+import { NzDateTimeInput } from "@/components/NzDateTimeInput";
 import { getOrCreatePassengerKey } from "@/lib/passengerKey";
 import {
   Car,
@@ -279,6 +280,7 @@ export default function BookPage() {
   const [successEditError, setSuccessEditError] = useState<string | null>(null);
   const [successCancelError, setSuccessCancelError] = useState<string | null>(null);
   const [successCancelled, setSuccessCancelled] = useState(false);
+  const [lastEditChanges, setLastEditChanges] = useState<string[] | null>(null);
   const [successEditForm, setSuccessEditForm] = useState({
     pickAddress: "",
     dropAddress: "",
@@ -749,6 +751,22 @@ export default function BookPage() {
           ? { scheduledFor: fromNZDatetimeLocal(successEditForm.scheduledFor) }
           : {}),
       }));
+      const apiChanges: string[] = Array.isArray(data.changes) ? data.changes : [];
+      if (apiChanges.length) {
+        setLastEditChanges(apiChanges);
+      } else {
+        // Fallback summary from the form so confirmation always shows notes/fields.
+        const summary: string[] = [];
+        if (successEditForm.pickAddress) summary.push(`Pickup → ${successEditForm.pickAddress}`);
+        if (successEditForm.dropAddress) summary.push(`Drop-off → ${successEditForm.dropAddress}`);
+        if (wasScheduled && successEditForm.scheduledFor) {
+          summary.push(
+            `Pickup time → ${new Date(fromNZDatetimeLocal(successEditForm.scheduledFor)).toLocaleString("en-NZ", { timeZone: "Pacific/Auckland", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`,
+          );
+        }
+        if (successEditForm.notes?.trim()) summary.push(`Notes → ${successEditForm.notes.trim()}`);
+        setLastEditChanges(summary);
+      }
       setIsEditingSuccessBooking(false);
     } catch (err: any) {
       setSuccessEditError(err.message ?? "Could not save changes");
@@ -1269,17 +1287,15 @@ export default function BookPage() {
                   </div>
                   {bookingType === "scheduled" && (
                     <div className="space-y-3">
-                      <Input
+                      <NzDateTimeInput
                         id="scheduledFor"
                         name="scheduledFor"
-                        type="datetime-local"
                         value={form.scheduledFor}
-                        onChange={handleChange}
+                        onChange={(val) => setForm((p) => ({ ...p, scheduledFor: val }))}
                         required={bookingType === "scheduled"}
                         min={new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 16)}
-                        className="rounded-xl h-11"
                       />
-                      <p className="text-xs text-muted-foreground">At least 5 minutes from now.</p>
+                      <p className="text-xs text-muted-foreground">At least 5 minutes from now. Tap Done to confirm the time.</p>
                     </div>
                   )}
                 </div>
@@ -1703,12 +1719,12 @@ export default function BookPage() {
                     {wasScheduled && (
                       <div className="space-y-2">
                         <Label className="font-bold text-sm">Scheduled time</Label>
-                        <Input
-                          type="datetime-local"
+                        <NzDateTimeInput
                           value={successEditForm.scheduledFor}
-                          onChange={(e) => setSuccessEditForm((p) => ({ ...p, scheduledFor: e.target.value }))}
-                          className="rounded-xl h-12"
+                          onChange={(val) => setSuccessEditForm((p) => ({ ...p, scheduledFor: val }))}
+                          inputClassName="h-12"
                         />
+                        <p className="text-xs text-muted-foreground">Tap Done to confirm the time.</p>
                       </div>
                     )}
                     <div className="space-y-2">
@@ -1752,16 +1768,58 @@ export default function BookPage() {
                 {wasScheduled ? <CalendarClock className="w-10 h-10" /> : selectedService === "food" ? <Utensils className="w-10 h-10" /> : <CheckCircle2 className="w-10 h-10" />}
               </div>
               <h1 className="text-3xl md:text-4xl font-display font-black text-foreground mb-3">
-                {wasScheduled ? "Ride scheduled!" : selectedService === "food" ? "Order placed!" : "Booking sent!"}
+                {lastEditChanges?.length
+                  ? "Booking updated"
+                  : wasScheduled
+                    ? "Ride scheduled!"
+                    : selectedService === "food"
+                      ? "Order placed!"
+                      : "Booking sent!"}
               </h1>
               <p className="text-muted-foreground font-medium mb-2 max-w-sm mx-auto">
-                {wasScheduled
+                {lastEditChanges?.length
+                  ? <>Your changes to booking <strong className="font-mono">{bookingId}</strong> with <strong>{selectedCompany?.name}</strong> have been saved.</>
+                  : wasScheduled
                   ? <>Your ride with <strong>{selectedCompany?.name}</strong> has been scheduled for <strong>{new Date(form.scheduledFor).toLocaleString("en-NZ", { timeZone: "Pacific/Auckland", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</strong>. Dispatch will be notified automatically before pickup.</>
                   : selectedService === "food"
                   ? <>Your order from <strong>{selectedRestaurant?.name}</strong> has been sent to <strong>{selectedCompany?.name}</strong>'s dispatch system.</>
                   : <>Your booking has been sent directly to <strong>{selectedCompany?.name}</strong>'s dispatch system.</>}
               </p>
               <p className="text-sm text-muted-foreground mb-2">Booking ID: <span className="font-mono font-bold text-foreground">{bookingId}</span></p>
+              {(lastEditChanges?.length || form.notes?.trim() || form.pickAddress || form.dropAddress) && (
+                <div className="max-w-sm mx-auto mb-6 text-left bg-muted/50 border border-border rounded-2xl px-5 py-4 space-y-2">
+                  {lastEditChanges?.length ? (
+                    <>
+                      <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">What changed</p>
+                      <ul className="text-sm text-foreground space-y-1.5 list-disc pl-4">
+                        {lastEditChanges.map((c) => (
+                          <li key={c}>{c}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  <div className="text-sm text-muted-foreground space-y-1 pt-1">
+                    {form.pickAddress ? <p><span className="font-semibold text-foreground">Pickup:</span> {form.pickAddress}</p> : null}
+                    {form.dropAddress ? <p><span className="font-semibold text-foreground">Drop-off:</span> {form.dropAddress}</p> : null}
+                    {wasScheduled && form.scheduledFor ? (
+                      <p>
+                        <span className="font-semibold text-foreground">Time:</span>{" "}
+                        {new Date(form.scheduledFor).toLocaleString("en-NZ", {
+                          timeZone: "Pacific/Auckland",
+                          weekday: "short",
+                          day: "numeric",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </p>
+                    ) : null}
+                    {form.notes?.trim() ? (
+                      <p><span className="font-semibold text-foreground">Notes:</span> {form.notes.trim()}</p>
+                    ) : null}
+                  </div>
+                </div>
+              )}
               {form.passengerEmail && (
                 <p className="text-sm text-muted-foreground mb-6">A confirmation has been sent to <strong>{form.passengerEmail}</strong>.</p>
               )}

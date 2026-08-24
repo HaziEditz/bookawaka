@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { NzDateTimeInput } from "@/components/NzDateTimeInput";
 import {
   Navigation,
   CalendarClock,
@@ -584,6 +585,7 @@ function RideCard({
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [lastSavedChanges, setLastSavedChanges] = useState<string[] | null>(null);
 
   // Time display rules:
   // - ASAP bookings store ScheduledFor=0 (SA dispatch contract). Showing
@@ -676,15 +678,28 @@ function RideCard({
       );
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not save changes");
+      const apiChanges: string[] = Array.isArray(data.changes) ? data.changes : [];
       onUpdate(ride.BookingId, {
         ...(isScheduled ? {
           ScheduledFor: fromNZDatetimeLocal(editForm.scheduledFor),
           ScheduledForMs: new Date(fromNZDatetimeLocal(editForm.scheduledFor)).getTime(),
         } : {}),
         Info: editForm.notes,
+        Notes: editForm.notes,
         PickAddress: editForm.pickAddress || ride.PickAddress,
         DropAddress: editForm.dropAddress || ride.DropAddress,
+        ...(data.booking?.BookingDateTime ? { BookingDateTime: data.booking.BookingDateTime } : {}),
+        ...(data.booking?.Pickingtime ? { Pickingtime: data.booking.Pickingtime } : {}),
       });
+      setLastSavedChanges(
+        apiChanges.length
+          ? apiChanges
+          : [
+              ...(editForm.pickAddress ? [`Pickup → ${editForm.pickAddress}`] : []),
+              ...(editForm.dropAddress ? [`Drop-off → ${editForm.dropAddress}`] : []),
+              ...(editForm.notes?.trim() ? [`Notes → ${editForm.notes.trim()}`] : []),
+            ],
+      );
       setIsEditing(false);
     } catch (err: any) {
       setSaveError(err.message ?? "Could not save. Please try again.");
@@ -764,6 +779,16 @@ function RideCard({
           {(ride.Info || ride.Notes) && (
             <div className="text-xs text-muted-foreground italic mt-1">{ride.Info || ride.Notes}</div>
           )}
+          {lastSavedChanges && lastSavedChanges.length > 0 && (
+            <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+              <p className="font-bold mb-1">Saved changes</p>
+              <ul className="list-disc pl-4 space-y-0.5">
+                {lastSavedChanges.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
@@ -774,12 +799,12 @@ function RideCard({
           {isScheduled && (
             <div>
               <Label className="text-xs font-bold text-muted-foreground mb-1 block">Scheduled time (NZ)</Label>
-              <input
-                type="datetime-local"
+              <NzDateTimeInput
                 value={editForm.scheduledFor}
-                onChange={(e) => setEditForm((f) => ({ ...f, scheduledFor: e.target.value }))}
-                className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                onChange={(val) => setEditForm((f) => ({ ...f, scheduledFor: val }))}
+                inputClassName="h-10 rounded-lg"
               />
+              <p className="text-[11px] text-muted-foreground mt-1">Tap Done to confirm the time.</p>
             </div>
           )}
           <div>

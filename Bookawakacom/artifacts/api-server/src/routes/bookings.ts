@@ -1,6 +1,5 @@
 import { Router } from "express";
 import { getDatabase } from "../lib/firebase";
-import { sendMailerSendEmail } from "../lib/mailersend";
 import { registerScheduledDispatch } from "../lib/scheduler";
 import { normalizeEmailKey } from "../lib/passengerKey";
 import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
@@ -8,7 +7,8 @@ import { findActiveBooking, normalizePhoneKey } from "../lib/active-booking-guar
 import { searchNzPlaces } from "../lib/geocode-search";
 import { estimateDispatchLeadMins } from "../lib/estimateDispatchLeadMins";
 import { resolveCompanyBaseLocation } from "../lib/resolveCompanyBaseLocation";
-import { resolveCompanyEmail } from "../lib/resolveCompanyEmail";
+import { formatNzBookingDateTime } from "../lib/formatNzBookingDateTime";
+import { sendBookingCreatedEmails } from "../lib/bookingNotifyEmails";
 
 const SA_DISPATCH_URL = "https://taxitime.co.nz/DataManager/Data.aspx";
 
@@ -53,27 +53,6 @@ async function notifyFoodDispatch({
   } catch (err: any) {
     log.error({ err, jobId, companyId }, "SA food dispatch: fetch failed");
   }
-}
-
-// SA dispatch HQ shows the time column from the BookingDateTime field, formatted
-// in NZ local time as `YYYY-MM-DD HH:mm:ss.` (note the trailing dot — that's
-// the literal C# DateTime.ToString() output the SA app uses).
-function formatNzBookingDateTime(d: Date): string {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Pacific/Auckland",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
-  // en-CA hour can render "24" at midnight; clamp to "00".
-  const hour = get("hour") === "24" ? "00" : get("hour");
-  return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get("minute")}:${get("second")}.`;
 }
 
 async function geocodeAddress(
@@ -535,7 +514,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     // Card payment bookings also always get website emails.
     const saSendsEmails = !isCardPayment && !isScheduled;
     if (!saSendsEmails) {
-      sendBookingEmails({
+      sendBookingCreatedEmails({
         booking,
         companyId,
         companyName,
@@ -585,147 +564,5 @@ bookingsRouter.get("/bookings/:bookingId/payment-status", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-async function sendBookingEmails({
-  booking,
-  companyId,
-  companyName,
-  companyEmail,
-  passengerEmail,
-  isScheduled,
-  isCardPayment,
-  log,
-}: {
-  booking: any;
-  companyId?: string;
-  companyName?: string;
-  companyEmail?: string;
-  passengerEmail?: string;
-  isScheduled?: boolean;
-  isCardPayment?: boolean;
-  log?: { warn: (obj: object, msg?: string) => void };
-}) {
-  const paymentMethodLabel: Record<string, string> = {
-    card: "Card (Stripe)",
-    account: "Account",
-    acc: "ACC",
-    tm: "Total Mobility",
-    giftcard: "Gift Card",
-    wallet: "BookaWaka Wallet",
-  };
-  const pmLabel = paymentMethodLabel[booking.paymentMethod] ?? booking.paymentMethod ?? "Account";
-  const fareDisplay = booking.Fare ? `NZD $${parseFloat(booking.Fare).toFixed(2)}` : "";
-
-  const scheduledLabel = booking.ScheduledFor
-    ? new Date(booking.ScheduledFor).toLocaleString("en-NZ", { timeZone: "Pacific/Auckland" })
-    : "As soon as possible";
-
-  const paymentNote = isCardPayment
-    ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;width:130px;">Payment</td><td style="padding:8px 0;color:#e67e00;font-weight:bold;">Awaiting card payment — not yet dispatched</td></tr>`
-    : `<tr><td style="padding:8px 0;font-weight:bold;color:#333;width:130px;">Payment</td><td style="padding:8px 0;color:#555;">${pmLabel}${fareDisplay ? ` — ${fareDisplay}` : ""}</td></tr>`;
-
-  const bookingDetailsHtml = `
-    <table style="width:100%;border-collapse:collapse;">
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;width:130px;">Booking ID</td><td style="padding:8px 0;color:#555;">${booking.BookingId}</td></tr>
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Service</td><td style="padding:8px 0;color:#555;">${booking.ServiceType ?? "Taxi"}</td></tr>
-      ${booking.VehicleType ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Vehicle</td><td style="padding:8px 0;color:#555;">${booking.VehicleType}</td></tr>` : ""}
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Passenger</td><td style="padding:8px 0;color:#555;">${booking.PassengerName}</td></tr>
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Phone</td><td style="padding:8px 0;color:#555;">${booking.PassengerPhone}</td></tr>
-      ${booking.PassengerEmail ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Email</td><td style="padding:8px 0;color:#555;">${booking.PassengerEmail}</td></tr>` : ""}
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Pick Up</td><td style="padding:8px 0;color:#555;">${booking.PickAddress}</td></tr>
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Drop Off</td><td style="padding:8px 0;color:#555;">${booking.DropAddress}</td></tr>
-      <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Scheduled</td><td style="padding:8px 0;color:#555;">${scheduledLabel}</td></tr>
-      ${paymentNote}
-      ${booking.Info ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Notes</td><td style="padding:8px 0;color:#555;">${booking.Info}</td></tr>` : ""}
-    </table>
-  `;
-
-  if (isScheduled) {
-    const resolvedCompanyEmail = await resolveCompanyEmail(companyId, companyEmail);
-
-    if (resolvedCompanyEmail) {
-      await sendMailerSendEmail({
-        to: [{ email: resolvedCompanyEmail, name: companyName ?? "Operator" }],
-        subject: `[Pre-booking] ${booking.PassengerName} — ${booking.PickAddress}`,
-        html: `
-          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-            <h2 style="color:#0a6b6b;margin-bottom:4px;">New Pre-booked Job</h2>
-            <p style="color:#666;margin-top:0;margin-bottom:24px;">via BookaWaka booking portal</p>
-            ${bookingDetailsHtml}
-            <p style="margin-top:24px;font-size:12px;color:#0a6b6b;"><strong>Pre-booked job</strong> — this booking is scheduled for the time above. It will be added to your dispatch queue automatically at that time.</p>
-          </div>
-        `,
-        fromName: "BookaWaka Bookings",
-      });
-    } else {
-      log?.warn(
-        { companyId, bookingId: booking.BookingId },
-        "Scheduled booking: no company email resolved (companyProfiles/superClients empty)",
-      );
-    }
-
-    if (passengerEmail) {
-      await sendMailerSendEmail({
-        to: [{ email: passengerEmail, name: booking.PassengerName }],
-        subject: `Booking Confirmed — ${booking.BookingId}`,
-        html: `
-          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-            <h2 style="color:#0a6b6b;">Your ride is scheduled!</h2>
-            <p>Hi ${booking.PassengerName}, your pre-booking with ${companyName ?? "your chosen company"} has been confirmed.</p>
-            <p style="color:#555;">Payment method: <strong>${pmLabel}</strong>${fareDisplay ? ` — ${fareDisplay}` : ""}.</p>
-            ${bookingDetailsHtml}
-            <p style="color:#666;margin-top:24px;">Questions? Reply to this email or contact the company directly.</p>
-          </div>
-        `,
-        fromName: "BookaWaka Bookings",
-      });
-    }
-    return;
-  }
-
-  const companyHtml = `
-    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-      <h2 style="color:#0a6b6b;margin-bottom:4px;">New Web Booking</h2>
-      <p style="color:#666;margin-top:0;margin-bottom:24px;">via BookaWaka booking portal</p>
-      ${bookingDetailsHtml}
-      ${isCardPayment
-        ? `<p style="margin-top:24px;font-size:12px;color:#e67e00;">This booking will appear in your dispatch queue once the passenger completes card payment.</p>`
-        : `<p style="margin-top:24px;font-size:12px;color:#999;">This booking has been added to your dispatch queue automatically.</p>`
-      }
-    </div>
-  `;
-
-  const resolvedCompanyEmail = await resolveCompanyEmail(companyId, companyEmail);
-  const companyRecipients: { email: string; name?: string }[] = [{ email: "info@bookawaka.com", name: "BookaWaka Admin" }];
-  if (resolvedCompanyEmail) companyRecipients.push({ email: resolvedCompanyEmail, name: companyName });
-
-  await sendMailerSendEmail({
-    to: companyRecipients,
-    subject: `[New Booking] ${booking.PassengerName} — ${booking.PickAddress}`,
-    html: companyHtml,
-    fromName: "BookaWaka Bookings",
-  });
-
-  if (passengerEmail) {
-    const passengerPaymentNote = isCardPayment
-      ? `<p style="color:#e67e00;font-weight:bold;">Your booking is reserved. Complete payment to confirm dispatch.</p>`
-      : `<p style="color:#555;">Payment method: <strong>${pmLabel}</strong>${fareDisplay ? ` — ${fareDisplay}` : ""}.</p>`;
-
-    await sendMailerSendEmail({
-      to: [{ email: passengerEmail, name: booking.PassengerName }],
-      subject: `Booking ${isCardPayment ? "Reserved" : "Confirmed"} — ${booking.BookingId}`,
-      html: `
-        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-          <h2 style="color:#0a6b6b;">Your booking is ${isCardPayment ? "reserved" : "confirmed"}!</h2>
-          <p>Hi ${booking.PassengerName}, your booking with ${companyName ?? "your chosen company"} has been received.</p>
-          ${passengerPaymentNote}
-          ${bookingDetailsHtml}
-          <p style="color:#666;">Questions? Reply to this email or contact the company directly.</p>
-        </div>
-      `,
-      fromName: "BookaWaka Bookings",
-    });
-  }
-}
 
 export default bookingsRouter;
