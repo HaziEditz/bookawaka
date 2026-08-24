@@ -57,10 +57,15 @@ interface Company {
   operatingHours?: string;
 }
 
-/** Same set as passenger-app booking — used for dispatch VehicleType eligibility. */
-const VEHICLE_TYPES = ["Sedan", "SUV", "Van", "Luxury", "Electric", "Wheelchair"] as const;
+/**
+ * Vehicle picker for taxi bookings.
+ * "Any" = no hard VehicleType on the booking (open eligibility) — default for 1–4 pax
+ * when the passenger has not explicitly chosen a type. Explicit picks are honored.
+ */
+const VEHICLE_TYPES = ["Any", "Sedan", "SUV", "Van", "Luxury", "Electric", "Wheelchair"] as const;
 type VehicleTypeOption = (typeof VEHICLE_TYPES)[number];
 const VEHICLE_LABELS: Record<VehicleTypeOption, string> = {
+  Any: "Any",
   Sedan: "Sedan",
   SUV: "SUV",
   Van: "Van",
@@ -242,7 +247,7 @@ export default function BookPage() {
   const [paidByCard, setPaidByCard] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("card");
-  const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Sedan");
+  const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Any");
   const [passengers, setPassengers] = useState(1);
   const [paymentRef, setPaymentRef] = useState("");
   const [verifying, setVerifying] = useState(false);
@@ -657,7 +662,15 @@ export default function BookPage() {
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
         paymentMethod: method,
-        vehicleType: selectedService === "taxi" ? (passengers >= 5 ? "Van" : vehicleType) : undefined,
+        // 5+ → Van. Explicit type → stamp it. "Any" / no pick → omit VehicleType (open eligibility).
+        vehicleType:
+          selectedService === "taxi"
+            ? passengers >= 5
+              ? "Van"
+              : vehicleType === "Any"
+                ? undefined
+                : vehicleType
+            : undefined,
         passengers: selectedService === "taxi" ? passengers : undefined,
         pickLat: pickCoords?.lat ?? 0,
         pickLng: pickCoords?.lng ?? 0,
@@ -1321,7 +1334,11 @@ export default function BookPage() {
                         className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
                       >
                         {VEHICLE_TYPES.map((vt) => (
-                          <option key={vt} value={vt} disabled={passengers >= 5 && vt !== "Van"}>
+                          <option
+                            key={vt}
+                            value={vt}
+                            disabled={passengers >= 5 && vt !== "Van"}
+                          >
                             {VEHICLE_LABELS[vt]}
                           </option>
                         ))}
@@ -1852,7 +1869,7 @@ export default function BookPage() {
                     setBookingType("now");
                     setForm({ passengerName: "", passengerPhone: "", passengerEmail: "", pickAddress: "", dropAddress: "", scheduledFor: "", notes: "", amount: "", notifyBefore: "30" });
                     setPassengers(1);
-                    setVehicleType("Sedan");
+                    setVehicleType("Any");
                     setBookingId(null);
                     setWasScheduled(false);
                     setPaidByCard(false);

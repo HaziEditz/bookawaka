@@ -347,7 +347,11 @@ bookingsRouter.post("/bookings", async (req, res) => {
     return 1;
   })();
   // 5+ passengers force Van vehicle type for dispatch eligibility.
+  // "Any" / "Not Specified" / blank = open eligibility (no VehicleType stamp).
   let resolvedVehicleType = vehicleType ? String(vehicleType).trim() : "";
+  if (/^(any|not\s*specified|all)$/i.test(resolvedVehicleType)) {
+    resolvedVehicleType = "";
+  }
   if (paxCount >= 5) {
     resolvedVehicleType = "Van";
   }
