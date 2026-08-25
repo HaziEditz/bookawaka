@@ -1775,14 +1775,41 @@ export default function BookPage() {
                   <>
                     <hr className="border-border" />
                     <Row label="Trip price" value={`NZD $${fareTotal.toFixed(2)}`} />
-                    {walletActive && (
+                    {paymentMethod === "tm" ? (
                       <>
-                        <Row label="Wallet credit" value={`- $${walletApplied.toFixed(2)}`} />
+                        {walletActive && walletApplied > 0 ? (
+                          <Row label="Wallet applied" value={`- $${walletApplied.toFixed(2)}`} />
+                        ) : null}
                         <Row
-                          label={walletCoversFull ? "Due" : "Card due"}
-                          value={walletCoversFull ? "Fully covered by wallet" : `NZD $${cardAmountDue.toFixed(2)}`}
+                          label={`You pay (${
+                            PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.label ?? tmRemainder
+                          })`}
+                          value={
+                            walletCoversFull
+                              ? "Fully covered by wallet"
+                              : `NZD $${(useWalletCredit ? cardAmountDue : fareTotal).toFixed(2)}`
+                          }
                         />
+                        <p className="text-xs text-muted-foreground pt-1">
+                          Total Mobility — council subsidy is settled with your approved TM card; the
+                          amount above is your remainder via{" "}
+                          {PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.label ?? tmRemainder}.
+                        </p>
                       </>
+                    ) : (
+                      walletActive && (
+                        <>
+                          <Row label="Wallet credit" value={`- $${walletApplied.toFixed(2)}`} />
+                          <Row
+                            label={walletCoversFull ? "Due" : "Card due"}
+                            value={
+                              walletCoversFull
+                                ? "Fully covered by wallet"
+                                : `NZD $${cardAmountDue.toFixed(2)}`
+                            }
+                          />
+                        </>
+                      )
                     )}
                   </>
                 )}

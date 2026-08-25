@@ -101,9 +101,18 @@ const STATUS_STYLES: Record<string, string> = {
  *  Declined / Reassigned / NoShow / Completed / Cancelled (both casings) / Closed.
  */
 function statusLabel(status: string | undefined): { text: string; key: string } {
-  const s = (status ?? "").toLowerCase();
+  const s = (status ?? "").toLowerCase().replace(/_/g, " ").trim();
   if (s === "scheduled") return { text: "Scheduled", key: "Scheduled" };
-  if (s === "pending") return { text: "Looking for driver", key: "Pending" };
+  // Internal dispatcher pool statuses — passenger still sees active search.
+  if (
+    s === "pending" ||
+    s === "no one" ||
+    s === "noone" ||
+    s === "waiting" ||
+    s === "queued"
+  ) {
+    return { text: "Looking for driver", key: "Pending" };
+  }
   // Dispatch has presented the job to a driver; awaiting their accept/decline.
   // Treated as an active state — passenger sees "Finding a driver".
   if (s === "offered" || s === "offer" || s === "offering") return { text: "Finding a driver", key: "Offered" };
@@ -113,7 +122,7 @@ function statusLabel(status: string | undefined): { text: string; key: string } 
   if (s === "arrived") return { text: "Driver arrived", key: "Arrived" };
   // Driver declined the offer — dispatch will reassign; passenger sees "Finding another driver"
   if (s === "declined") return { text: "Finding another driver", key: "Declined" };
-  if (s === "noshow" || s === "no_show") return { text: "No show", key: "NoShow" };
+  if (s === "noshow" || s === "no show") return { text: "No show", key: "NoShow" };
   if (s === "reassigned") return { text: "Reassigned", key: "Reassigned" };
   if (s === "cancelled" || s === "canceled") return { text: "Cancelled", key: "Cancelled" };
   if (s === "completed") return { text: "Completed", key: "Completed" };
@@ -268,6 +277,7 @@ export default function MyRidesPage() {
   const visibleRides = rides.filter((r) => !dismissed.has(r.BookingId));
   const upcomingStatusesLower = new Set([
     "scheduled", "pending",
+    "no one", "noone", "waiting", "queued",
     "pendingpayment", "paymentpending",
     "offered", "offer", "offering",
     "assigned", "accepted",

@@ -439,13 +439,27 @@ bookingsRouter.post("/bookings", async (req, res) => {
     ...(isWalletOnly ? { paymentStatus: "paid", paidAt: now.toISOString() } : {}),
     ...(restaurantId ? { RestaurantId: restaurantId, RestaurantName: restaurantName ?? "" } : {}),
     ...(orderItems && orderItems.length > 0 ? { OrderItems: orderItems } : {}),
-    ...(accountNumber ? { accountNumber } : {}),
-    ...(tmCardNumber ? { tmCardNumber, TmCardNumber: tmCardNumber } : {}),
-    ...(giftCardCode ? { giftCardCode } : {}),
+    ...(accountNumber
+      ? {
+          accountNumber,
+          Account_id: accountNumber,
+          AccountId: accountNumber,
+          jobAccountId: accountNumber,
+        }
+      : {}),
+    ...(tmCardNumber
+      ? {
+          tmCardNumber,
+          TmCardNumber: tmCardNumber,
+          tmVoucherNo: tmCardNumber,
+        }
+      : {}),
+    ...(giftCardCode ? { giftCardCode, GiftCardCode: giftCardCode } : {}),
     ...(isTM
       ? {
           isTM: true,
           IsTM: true,
+          isTotalMobility: true,
           ...(tmCardName ? { tmCardName, TmCardName: tmCardName } : {}),
           ...(tmCardExpiry ? { tmCardExpiry, TmCardExpiry: tmCardExpiry } : {}),
         }

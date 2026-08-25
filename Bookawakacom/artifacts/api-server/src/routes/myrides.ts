@@ -111,14 +111,32 @@ myRidesRouter.get("/my-rides", async (req, res) => {
           const liveSnap = await db.ref(`allbookings/${cid}/${bid}`).once("value");
           const live = liveSnap.val();
           if (!live || typeof live !== "object") return r;
+          const paxSt = String(r.Status ?? r.status ?? "").toLowerCase();
+          const liveSt = String(live.Status ?? live.status ?? "").toLowerCase();
+          const paxTerminal = paxSt === "cancelled" || paxSt === "canceled" || paxSt === "completed";
+          const liveTerminal =
+            liveSt === "cancelled" ||
+            liveSt === "canceled" ||
+            liveSt === "completed" ||
+            liveSt === "closed" ||
+            liveSt === "noshow" ||
+            liveSt === "no_show";
+          // Half-cancel guard: if Passengerjobs is Cancelled (wallet credited) but
+          // allbookings was healed back to Pending, keep Cancelled for My Rides.
+          const keepPaxStatus = paxTerminal && !liveTerminal;
           return {
             ...r,
-            ...(live.Status != null ? { Status: live.Status } : {}),
-            ...(live.status != null ? { status: live.status } : {}),
+            ...(live.Status != null && !keepPaxStatus ? { Status: live.Status } : {}),
+            ...(live.status != null && !keepPaxStatus ? { status: live.status } : {}),
+            ...(keepPaxStatus
+              ? { Status: r.Status ?? "Cancelled", status: r.status ?? "Cancelled" }
+              : {}),
             ...(live.DriverId ? { DriverId: live.DriverId } : {}),
             ...(live.paymentStatus ? { paymentStatus: live.paymentStatus } : {}),
             ...(live.CancelledAt ? { CancelledAt: live.CancelledAt } : {}),
             ...(live.CancelledBy ? { CancelledBy: live.CancelledBy } : {}),
+            ...(r.CancelledAt && !live.CancelledAt ? { CancelledAt: r.CancelledAt } : {}),
+            ...(r.refundStatus ? { refundStatus: r.refundStatus } : {}),
             ...(live.Info != null ? { Info: live.Info } : {}),
             ...(live.Notes != null ? { Notes: live.Notes } : {}),
             ...(live.PickAddress ? { PickAddress: live.PickAddress } : {}),
@@ -166,6 +184,10 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
       "Scheduled", "scheduled",
       "Pending", "pending",
       "PendingPayment", "pendingpayment", "paymentpending",
+      // Dispatcher pool / waiting states — passenger still sees "Looking for driver".
+      "No One", "no one", "NoOne", "noone",
+      "Waiting", "waiting",
+      "Queued", "queued",
       // "Offered" = dispatch presented the job to a driver; no driver has accepted yet,
       // so passenger-initiated cancel is still allowed (same as Pending).
       "Offered", "offered", "Offer", "offer", "Offering", "offering",

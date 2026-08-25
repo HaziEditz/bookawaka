@@ -7,6 +7,7 @@ import {
   commissionFieldsFromMetadata,
   resolveTaxiCommissionPct,
 } from "../lib/stripe-commission";
+import { registerScheduledDispatch } from "../lib/scheduler";
 
 const stripeRouter = Router();
 
@@ -235,6 +236,21 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
       return;
     }
 
+    const existingSt = String(existing.Status ?? existing.status ?? "").toLowerCase();
+    if (
+      existingSt === "cancelled" ||
+      existingSt === "canceled" ||
+      existingSt === "completed" ||
+      existingSt === "closed"
+    ) {
+      req.log.info(
+        { bookingId, companyId, existingSt },
+        "verify-and-dispatch: booking already terminal — not rewriting to Pending",
+      );
+      res.json({ ok: true, alreadyDispatched: true, terminal: existingSt });
+      return;
+    }
+
     // Idempotent — if already dispatched (paymentStatus === "paid") just return success
     if (existing.paymentStatus === "paid") {
       req.log.info({ bookingId, companyId }, "verify-and-dispatch: already dispatched, skipping");
@@ -245,11 +261,19 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const paidAt = new Date().toISOString();
     const commissionFields = commissionFieldsFromMetadata(meta as Record<string, string>);
     const walletFields = await applyPendingWalletDebit(db, existing, bookingId, companyId, req.log);
+
+    // Scheduled card bookings stay Scheduled until the dispatcher release window —
+    // do not force Pending + pendingjobs (My Rides "Looking for driver" bug).
+    const scheduledMs = Number(existing.ScheduledForMs ?? existing.ScheduledFor ?? 0);
+    const isScheduled = Number.isFinite(scheduledMs) && scheduledMs > Date.now() + 60_000;
+    const postPayStatus = isScheduled ? "Scheduled" : "Pending";
+
     const paidBooking = {
       ...existing,
       ...walletFields,
       ...commissionFields,
-      Status: "Pending",
+      Status: postPayStatus,
+      BookingStatus: postPayStatus,
       paymentMethod: "card",
       paymentStatus: "paid",
       stripeSessionId: session.id,
@@ -259,7 +283,8 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const paidFields = {
       ...walletFields,
       ...commissionFields,
-      Status: "Pending",
+      Status: postPayStatus,
+      BookingStatus: postPayStatus,
       paymentMethod: "card",
       paymentStatus: "paid",
       stripeSessionId: session.id,
@@ -277,8 +302,13 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
 
     const writes: Promise<any>[] = [
       db.ref(`allbookings/${companyId}/${bookingId}`).update(paidFields),
-      db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking),
     ];
+    if (!isScheduled) {
+      writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking));
+    } else {
+      // Ensure a stale pendingjobs row from an earlier bug is cleared for scheduled.
+      writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).remove());
+    }
 
     // Keep Passengerjobs in sync so My Rides shows the correct status
     if (passengerKey) {
@@ -287,8 +317,28 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
 
     await Promise.all(writes);
 
-    req.log.info({ bookingId, companyId, sessionId }, "verify-and-dispatch: dispatched to pendingjobs");
-    res.json({ ok: true, alreadyDispatched: false });
+    if (isScheduled) {
+      const leadMins =
+        Number(
+          existing.NotifyDispatchBeforeMinutes ??
+            existing.DispatchTimebefore ??
+            paidBooking.NotifyDispatchBeforeMinutes ??
+            30,
+        ) || 30;
+      const notifyAtMs = scheduledMs - leadMins * 60 * 1000;
+      registerScheduledDispatch({
+        companyId,
+        bookingId,
+        notifyAt: new Date(notifyAtMs).toISOString(),
+      });
+      req.log.info(
+        { bookingId, companyId, sessionId, postPayStatus },
+        "verify-and-dispatch: card paid — kept Scheduled (not pendingjobs)",
+      );
+    } else {
+      req.log.info({ bookingId, companyId, sessionId }, "verify-and-dispatch: dispatched to pendingjobs");
+    }
+    res.json({ ok: true, alreadyDispatched: false, status: postPayStatus });
   } catch (err: any) {
     req.log.error({ err }, "POST /stripe/verify-and-dispatch error");
     res.status(500).json({ error: err.message ?? "Verification failed" });
@@ -331,42 +381,87 @@ stripeRouter.post("/stripe/webhook", async (req, res) => {
         const existingBooking = bookingSnap.val() as Record<string, any> | null;
 
         if (existingBooking) {
-          const meta = (session.metadata ?? {}) as Record<string, string>;
-          const commissionFields = commissionFieldsFromMetadata(meta);
-          const walletFields = await applyPendingWalletDebit(
-            db,
-            existingBooking,
-            bookingId,
-            companyId,
-            req.log
-          );
-          const paidAt = new Date().toISOString();
-          const paidBooking = {
-            ...existingBooking,
-            ...walletFields,
-            ...commissionFields,
-            Status: "Pending",
-            paymentStatus: "paid",
-            stripeSessionId: session.id,
-            paidAt,
-          };
-
-          await Promise.all([
-            // Update allbookings with paid status and move to Pending
-            db.ref(`allbookings/${companyId}/${bookingId}`).update({
+          const existingSt = String(
+            existingBooking.Status ?? existingBooking.status ?? "",
+          ).toLowerCase();
+          if (
+            existingSt === "cancelled" ||
+            existingSt === "canceled" ||
+            existingSt === "completed" ||
+            existingSt === "closed"
+          ) {
+            req.log.info(
+              { bookingId, companyId, existingSt },
+              "Stripe webhook: booking already terminal — skip Pending rewrite",
+            );
+          } else if (existingBooking.paymentStatus === "paid") {
+            req.log.info({ bookingId, companyId }, "Stripe webhook: already paid — skip");
+          } else {
+            const meta = (session.metadata ?? {}) as Record<string, string>;
+            const commissionFields = commissionFieldsFromMetadata(meta);
+            const walletFields = await applyPendingWalletDebit(
+              db,
+              existingBooking,
+              bookingId,
+              companyId,
+              req.log
+            );
+            const paidAt = new Date().toISOString();
+            const scheduledMs = Number(
+              existingBooking.ScheduledForMs ?? existingBooking.ScheduledFor ?? 0,
+            );
+            const isScheduled =
+              Number.isFinite(scheduledMs) && scheduledMs > Date.now() + 60_000;
+            const postPayStatus = isScheduled ? "Scheduled" : "Pending";
+            const paidBooking = {
+              ...existingBooking,
               ...walletFields,
               ...commissionFields,
-              Status: "Pending",
-              paymentMethod: "card",
+              Status: postPayStatus,
+              BookingStatus: postPayStatus,
               paymentStatus: "paid",
+              paymentMethod: "card",
               stripeSessionId: session.id,
               paidAt,
-            }),
-            // NOW write to pendingjobs to trigger dispatch
-            db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking),
-          ]);
+            };
 
-          req.log.info({ bookingId, companyId, sessionId: session.id }, "Booking paid — dispatched to pendingjobs");
+            const writes: Promise<any>[] = [
+              db.ref(`allbookings/${companyId}/${bookingId}`).update({
+                ...walletFields,
+                ...commissionFields,
+                Status: postPayStatus,
+                BookingStatus: postPayStatus,
+                paymentMethod: "card",
+                paymentStatus: "paid",
+                stripeSessionId: session.id,
+                paidAt,
+              }),
+            ];
+            if (!isScheduled) {
+              writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking));
+            } else {
+              writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).remove());
+              const leadMins =
+                Number(
+                  existingBooking.NotifyDispatchBeforeMinutes ??
+                    existingBooking.DispatchTimebefore ??
+                    30,
+                ) || 30;
+              registerScheduledDispatch({
+                companyId,
+                bookingId,
+                notifyAt: new Date(scheduledMs - leadMins * 60 * 1000).toISOString(),
+              });
+            }
+            await Promise.all(writes);
+
+            req.log.info(
+              { bookingId, companyId, sessionId: session.id, postPayStatus },
+              isScheduled
+                ? "Booking paid — kept Scheduled"
+                : "Booking paid — dispatched to pendingjobs",
+            );
+          }
         } else {
           req.log.warn({ bookingId, companyId }, "Stripe webhook: booking not found in allbookings");
         }
