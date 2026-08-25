@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
+import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
   Navigation,
   CalendarClock,
@@ -126,30 +127,6 @@ function getStoredKey(): string | null {
 
 function saveKey(key: string) {
   localStorage.setItem("bw_passenger_key", key);
-}
-
-/** Convert a UTC ISO string to a datetime-local input value in NZ time */
-function toNZDatetimeLocal(isoOrMs: string | number | undefined): string {
-  // ASAP bookings have ScheduledFor=0 (per SA dispatch contract); guard
-  // against that explicitly because `new Date(0)` would render as 1970.
-  if (isoOrMs == null || isoOrMs === "" || isoOrMs === 0) return "";
-  const d = new Date(isoOrMs);
-  if (isNaN(d.getTime())) return "";
-  // en-CA gives "YYYY-MM-DD, HH:MM:SS" format
-  const nzStr = d.toLocaleString("en-CA", { timeZone: "Pacific/Auckland", hour12: false });
-  return nzStr.replace(", ", "T").slice(0, 16);
-}
-
-/** Convert a datetime-local string (entered as NZ local time) back to UTC ISO */
-function fromNZDatetimeLocal(localStr: string): string {
-  if (!localStr) throw new Error("No scheduled time entered");
-  // Get the current NZ→UTC offset by comparing clocks
-  const utcNow = new Date();
-  const nzNow = new Date(utcNow.toLocaleString("en-US", { timeZone: "Pacific/Auckland" }));
-  const offsetMs = utcNow.getTime() - nzNow.getTime();
-  const result = new Date(new Date(localStr + "Z").getTime() + offsetMs);
-  if (isNaN(result.getTime())) throw new Error("Invalid scheduled time");
-  return result.toISOString();
 }
 
 export default function MyRidesPage() {

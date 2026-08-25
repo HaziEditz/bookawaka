@@ -13,6 +13,7 @@ import AddressInput from "@/components/AddressInput";
 import BookingMapPanel from "@/components/BookingMapPanel";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
 import { getOrCreatePassengerKey } from "@/lib/passengerKey";
+import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
   Car,
   Utensils,
@@ -1982,34 +1983,4 @@ function ActiveBookingAlert({ conflict }: { conflict: ActiveBookingConflict }) {
       </div>
     </div>
   );
-}
-
-function toNZDatetimeLocal(isoOrMs: string | number | undefined): string {
-  if (isoOrMs == null || isoOrMs === "" || isoOrMs === 0) return "";
-  const d = new Date(isoOrMs);
-  if (isNaN(d.getTime())) return "";
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Pacific/Auckland",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
-  const hour = get("hour") === "24" ? "00" : get("hour");
-  return `${get("year")}-${get("month")}-${get("day")}T${hour}:${get("minute")}`;
-}
-
-function fromNZDatetimeLocal(localStr: string): string {
-  if (!localStr) throw new Error("No scheduled time entered");
-  const utcNow = new Date();
-  const nzNow = new Date(utcNow.toLocaleString("en-US", { timeZone: "Pacific/Auckland" }));
-  const offsetMs = utcNow.getTime() - nzNow.getTime();
-  const [datePart, timePart] = localStr.split("T");
-  const [y, m, d] = datePart.split("-").map(Number);
-  const [hh, mm] = timePart.split(":").map(Number);
-  const nzAsUtc = Date.UTC(y, m - 1, d, hh, mm);
-  return new Date(nzAsUtc + offsetMs).toISOString();
 }
