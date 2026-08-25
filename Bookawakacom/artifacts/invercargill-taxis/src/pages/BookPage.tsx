@@ -316,7 +316,9 @@ export default function BookPage() {
       if (res.ok) {
         const bal = typeof d.balance === "number" ? d.balance : 0;
         setWalletBalance(bal);
-        if (bal > 0) setUseWalletCredit(true);
+        // Do NOT auto-enable wallet spend. Auto-on previously stuck true across
+        // Account/TM/Cash reviews and showed a fake "Wallet credit / Card due"
+        // without ever debiting (wallet is card-checkout only).
       }
     } catch {
       // wallet display is non-critical
@@ -1004,13 +1006,15 @@ export default function BookPage() {
 
   const hasAmount = !!form.amount && parseFloat(form.amount) > 0;
   const fareTotal = hasAmount ? parseFloat(form.amount) : 0;
+  // Wallet spend is Card-checkout only (incl. TM remainder = Card). Never Account/Cash/ACC/Gift/TM-cash.
+  const walletEligible = effectiveCheckoutMethod === "card";
   const walletApplied =
-    useWalletCredit && walletBalance > 0 && hasAmount
+    walletEligible && useWalletCredit && walletBalance > 0 && hasAmount
       ? Math.min(walletBalance, fareTotal)
       : 0;
   const cardAmountDue = hasAmount ? +(fareTotal - walletApplied).toFixed(2) : 0;
-  const walletCoversFull = walletApplied > 0 && cardAmountDue <= 0;
-  const walletActive = useWalletCredit && walletApplied > 0;
+  const walletCoversFull = walletEligible && walletApplied > 0 && cardAmountDue <= 0;
+  const walletActive = walletEligible && useWalletCredit && walletApplied > 0;
   const availableServices = selectedCompany?.services ?? [];
 
   return (
@@ -1504,6 +1508,8 @@ export default function BookPage() {
                           setTmRemainderRef("");
                           setTmRemainderVerified(pm.value === "tm");
                           setTmRemainderError(null);
+                          // Wallet only applies on card checkout — clear when leaving card.
+                          setUseWalletCredit(pm.value === "card");
                         }}
                         className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border font-medium text-sm transition-colors ${
                           paymentMethod === pm.value
@@ -1604,6 +1610,8 @@ export default function BookPage() {
                                     setTmRemainderRef("");
                                     setTmRemainderError(null);
                                     setTmRemainderVerified(pm.value === "cash" || pm.value === "card");
+                                    // Wallet only for Card remainder — never TM Cash/Account/etc.
+                                    setUseWalletCredit(pm.value === "card");
                                   }}
                                   className={`flex items-center gap-2 px-3 py-2 rounded-xl border font-medium text-sm transition-colors ${
                                     tmRemainder === pm.value
@@ -1785,9 +1793,9 @@ export default function BookPage() {
                             PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.label ?? tmRemainder
                           })`}
                           value={
-                            walletCoversFull
+                            walletActive && walletCoversFull
                               ? "Fully covered by wallet"
-                              : `NZD $${(useWalletCredit ? cardAmountDue : fareTotal).toFixed(2)}`
+                              : `NZD ${(walletActive ? cardAmountDue : fareTotal).toFixed(2)}`
                           }
                         />
                         <p className="text-xs text-muted-foreground pt-1">
@@ -1817,7 +1825,7 @@ export default function BookPage() {
                 <Row
                   label="Payment"
                   value={
-                    walletCoversFull && useWalletCredit
+                    walletCoversFull
                       ? "BookaWaka Wallet"
                       : paymentMethod === "tm"
                       ? `Total Mobility — remainder ${PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.label ?? tmRemainder}${
@@ -1848,7 +1856,8 @@ export default function BookPage() {
                   <ArrowLeft className="w-5 h-5 mr-2" /> Back to edit details
                 </Button>
 
-                {(walletLoading || walletBalance > 0) && (
+                {/* Wallet apply UI is Card-checkout only (incl. TM remainder = Card). */}
+                {(walletLoading || walletBalance > 0) && walletEligible && (
                   <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-3">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex items-start gap-3">
@@ -1894,7 +1903,7 @@ export default function BookPage() {
                 )}
 
                 {/* Action buttons */}
-                {walletCoversFull && useWalletCredit ? (
+                {walletCoversFull ? (
                   <>
                     <Button
                       onClick={handlePayWithWallet}
