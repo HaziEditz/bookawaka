@@ -169,6 +169,8 @@ const SERVICE_LABELS: Record<string, { label: string; icon: React.ReactNode; des
 const STEPS = ["Company", "Service", "Details", "Confirm"];
 
 type PaymentMethod = "card" | "account" | "acc" | "tm" | "giftcard" | "cash";
+/** Remainder methods after TM subsidy — Cash is always offered (ignores company cash toggle). */
+type TmRemainderMethod = Exclude<PaymentMethod, "tm">;
 
 const PAYMENT_METHODS: Array<{
   value: PaymentMethod;
@@ -209,8 +211,8 @@ const PAYMENT_METHODS: Array<{
     value: "tm",
     label: "Total Mobility",
     icon: <Ticket className="w-4 h-4" />,
-    placeholder: "TM card / voucher number",
-    help: "Total Mobility scheme. Enter your card or voucher number to verify.",
+    placeholder: "TM card number",
+    help: "Total Mobility scheme. Enter your TM card number, confirm name/expiry, then choose how to pay the remainder.",
   },
   {
     value: "giftcard",
@@ -255,6 +257,15 @@ export default function BookPage() {
   const [verified, setVerified] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const verifyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // TM card details + remainder (Cash always available for TM remainder)
+  const [tmPassengerName, setTmPassengerName] = useState("");
+  const [tmExpiryDate, setTmExpiryDate] = useState("");
+  const [tmRemainder, setTmRemainder] = useState<TmRemainderMethod>("cash");
+  const [tmRemainderRef, setTmRemainderRef] = useState("");
+  const [tmRemainderVerified, setTmRemainderVerified] = useState(false);
+  const [tmRemainderVerifying, setTmRemainderVerifying] = useState(false);
+  const [tmRemainderError, setTmRemainderError] = useState<string | null>(null);
+  const tmRemainderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickCoords, setPickCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [dropCoords, setDropCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [pickAddressActive, setPickAddressActive] = useState(false);
@@ -482,6 +493,14 @@ export default function BookPage() {
         const d = await res.json();
         setVerified(!!d.valid);
         setVerifyError(d.valid ? null : (d.message ?? "Verification failed."));
+        if (paymentMethod === "tm" && d.valid) {
+          if (d.passengerName && !tmPassengerName.trim()) {
+            setTmPassengerName(String(d.passengerName));
+          }
+          if (d.expiryDate && !tmExpiryDate.trim()) {
+            setTmExpiryDate(String(d.expiryDate).slice(0, 10));
+          }
+        }
       } catch {
         setVerified(false);
         setVerifyError("Could not verify. Please check your connection.");
@@ -490,6 +509,52 @@ export default function BookPage() {
       }
     }, 600);
   }, [paymentRef, paymentMethod, selectedCompany, fareEstimate]);
+
+  // TM remainder reference verify (Account / ACC / Gift Card)
+  useEffect(() => {
+    if (paymentMethod !== "tm" || !selectedCompany) {
+      setTmRemainderVerified(false);
+      setTmRemainderError(null);
+      if (tmRemainderDebounceRef.current) clearTimeout(tmRemainderDebounceRef.current);
+      setTmRemainderVerifying(false);
+      return;
+    }
+    if (tmRemainder === "cash" || tmRemainder === "card") {
+      setTmRemainderVerified(true);
+      setTmRemainderError(null);
+      setTmRemainderVerifying(false);
+      if (tmRemainderDebounceRef.current) clearTimeout(tmRemainderDebounceRef.current);
+      return;
+    }
+    const ref = tmRemainderRef.trim();
+    setTmRemainderVerified(false);
+    setTmRemainderError(null);
+    if (tmRemainderDebounceRef.current) clearTimeout(tmRemainderDebounceRef.current);
+    if (!ref) {
+      setTmRemainderVerifying(false);
+      return;
+    }
+    setTmRemainderVerifying(true);
+    tmRemainderDebounceRef.current = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({
+          cid: selectedCompany.id,
+          method: tmRemainder,
+          reference: ref,
+          ...(fareEstimate ? { estimatedFare: String(fareEstimate.estimate) } : {}),
+        });
+        const res = await fetch(`${import.meta.env.BASE_URL}api/verify-payment?${params}`);
+        const d = await res.json();
+        setTmRemainderVerified(!!d.valid);
+        setTmRemainderError(d.valid ? null : (d.message ?? "Verification failed."));
+      } catch {
+        setTmRemainderVerified(false);
+        setTmRemainderError("Could not verify. Please check your connection.");
+      } finally {
+        setTmRemainderVerifying(false);
+      }
+    }, 600);
+  }, [paymentMethod, tmRemainder, tmRemainderRef, selectedCompany, fareEstimate]);
 
   const availablePaymentMethods = PAYMENT_METHODS.filter((pm) => {
     if (pm.value === "card") {
@@ -500,6 +565,28 @@ export default function BookPage() {
     }
     return true;
   });
+
+  /** TM remainder chips — Cash always included regardless of company cash toggle. */
+  const tmRemainderMethods = PAYMENT_METHODS.filter((pm) => {
+    if (pm.value === "tm") return false;
+    if (pm.value === "cash") return true;
+    if (pm.value === "card") {
+      return paymentConfig?.cardEnabled === true || paymentConfig == null;
+    }
+    return true;
+  });
+
+  const tmPaymentReady =
+    paymentMethod !== "tm" ||
+    (verified &&
+      !!tmPassengerName.trim() &&
+      !!tmExpiryDate.trim() &&
+      (tmRemainder === "cash" ||
+        tmRemainder === "card" ||
+        (tmRemainderRef.trim().length > 0 && tmRemainderVerified)));
+
+  const effectiveCheckoutMethod: PaymentMethod =
+    paymentMethod === "tm" ? tmRemainder : paymentMethod;
 
   useEffect(() => {
     if (paymentConfig?.cardEnabled === false && paymentMethod === "card") {
@@ -633,10 +720,24 @@ export default function BookPage() {
     method: PaymentMethod,
     options?: { useWallet?: boolean }
   ) => {
-    const refFields: Record<string, string> = {};
-    if (method === "account" || method === "acc") refFields.accountNumber = paymentRef;
-    if (method === "tm") refFields.tmCardNumber = paymentRef;
-    if (method === "giftcard") refFields.giftCardCode = paymentRef;
+    const bookingIsTM = paymentMethod === "tm";
+    const payMethod: PaymentMethod = bookingIsTM ? tmRemainder : method;
+    const accountOrAccRef = bookingIsTM ? tmRemainderRef : paymentRef;
+    const giftRef = bookingIsTM ? tmRemainderRef : paymentRef;
+
+    const refFields: Record<string, string | boolean> = {};
+    if (payMethod === "account" || payMethod === "acc") {
+      refFields.accountNumber = accountOrAccRef.trim();
+    }
+    if (payMethod === "giftcard") {
+      refFields.giftCardCode = giftRef.trim().toUpperCase();
+    }
+    if (bookingIsTM) {
+      refFields.isTM = true;
+      refFields.tmCardNumber = paymentRef.trim();
+      if (tmPassengerName.trim()) refFields.tmCardName = tmPassengerName.trim();
+      if (tmExpiryDate.trim()) refFields.tmCardExpiry = tmExpiryDate.trim();
+    }
 
     const res = await fetch(`${import.meta.env.BASE_URL}api/bookings`, {
       method: "POST",
@@ -659,7 +760,7 @@ export default function BookPage() {
             : undefined,
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
-        paymentMethod: method,
+        paymentMethod: payMethod,
         // 5+ → Van. Explicit type → stamp it. "Any" / no pick → omit VehicleType (open eligibility).
         vehicleType:
           selectedService === "taxi"
@@ -833,11 +934,15 @@ export default function BookPage() {
       setError("An email address is required to receive your booking confirmation");
       return;
     }
+    if (paymentMethod === "tm" && !tmPaymentReady) {
+      setError("Please complete Total Mobility card and remainder payment details.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
       const jobId = await reserveJobId();
-      await createBooking(jobId, paymentMethod);
+      await createBooking(jobId, effectiveCheckoutMethod);
       setBookingId(jobId);
       setWasScheduled(bookingType === "scheduled");
       setPaidByCard(false);
@@ -852,6 +957,10 @@ export default function BookPage() {
   const handlePayByCard = async () => {
     if (!form.passengerEmail.trim()) {
       setError("An email address is required to receive your booking confirmation");
+      return;
+    }
+    if (paymentMethod === "tm" && !tmPaymentReady) {
+      setError("Please complete Total Mobility card and remainder payment details.");
       return;
     }
     const chargeAmount = walletActive ? cardAmountDue : parseFloat(form.amount);
@@ -884,6 +993,7 @@ export default function BookPage() {
       });
       const stripeData = await stripeRes.json();
       if (!stripeRes.ok) throw new Error(stripeData.error ?? "Could not start card payment");
+      if (!stripeData.url) throw new Error("Card checkout did not return a payment URL. Please try again or use another payment method.");
       (window.top ?? window).location.href = stripeData.url;
     } catch (err: any) {
       handleBookingError(err);
@@ -1152,7 +1262,24 @@ export default function BookPage() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  if (paymentMethod !== "card" && paymentMethod !== "cash") {
+                  if (paymentMethod === "tm") {
+                    if (!paymentRef.trim()) {
+                      setError("Please enter your TM card number.");
+                      return;
+                    }
+                    if (!verified) {
+                      setError("Please wait for TM card verification to complete.");
+                      return;
+                    }
+                    if (!tmPassengerName.trim() || !tmExpiryDate.trim()) {
+                      setError("Please enter the TM cardholder name and expiry date.");
+                      return;
+                    }
+                    if (!tmPaymentReady) {
+                      setError("Please complete and verify the remainder payment option.");
+                      return;
+                    }
+                  } else if (paymentMethod !== "card" && paymentMethod !== "cash") {
                     if (!paymentRef.trim()) {
                       setError(`Please enter your ${PAYMENT_METHODS.find((m) => m.value === paymentMethod)?.placeholder?.toLowerCase() ?? "payment reference"}.`);
                       return;
@@ -1371,6 +1498,12 @@ export default function BookPage() {
                           setVerified(pm.value === "cash" || pm.value === "card");
                           setVerifyError(null);
                           setError(null);
+                          setTmPassengerName("");
+                          setTmExpiryDate("");
+                          setTmRemainder("cash");
+                          setTmRemainderRef("");
+                          setTmRemainderVerified(pm.value === "tm");
+                          setTmRemainderError(null);
                         }}
                         className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border font-medium text-sm transition-colors ${
                           paymentMethod === pm.value
@@ -1388,7 +1521,145 @@ export default function BookPage() {
                     <p className="text-xs text-muted-foreground">{PAYMENT_METHODS.find((m) => m.value === "cash")?.help}</p>
                   )}
 
-                  {paymentMethod !== "card" && paymentMethod !== "cash" && (() => {
+                  {paymentMethod === "card" && (
+                    <>
+                      <p className="text-xs text-muted-foreground">{PAYMENT_METHODS[0].help}</p>
+                      <div className="rounded-xl border border-sky-200/80 bg-sky-50/80 p-3 text-xs text-sky-950 flex items-start gap-2">
+                        <CreditCard className="w-4 h-4 mt-0.5 shrink-0" />
+                        <span>
+                          Selected. On the next step you&apos;ll confirm the fare and be redirected to Stripe checkout to enter your card details.
+                        </span>
+                      </div>
+                      <div className="rounded-xl border border-amber-200/80 bg-amber-50/80 p-3 text-xs text-amber-950 flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                        <span>
+                          Cancel before a driver is assigned and the fare goes to your BookaWaka wallet (phone-linked credit), not back to your card. No credit after a driver is assigned.
+                        </span>
+                      </div>
+                    </>
+                  )}
+
+                  {paymentMethod === "tm" && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-muted-foreground">{PAYMENT_METHODS.find((m) => m.value === "tm")?.help}</p>
+                      <div className="relative">
+                        <Input
+                          value={paymentRef}
+                          onChange={(e) => setPaymentRef(e.target.value)}
+                          placeholder="TM card number"
+                          className="rounded-xl h-11 pr-10"
+                          autoComplete="off"
+                          inputMode="numeric"
+                        />
+                        {verifying && (
+                          <Loader2 className="absolute right-3 top-3 w-5 h-5 animate-spin text-muted-foreground pointer-events-none" />
+                        )}
+                        {!verifying && verified && (
+                          <CheckCircle2 className="absolute right-3 top-3 w-5 h-5 text-emerald-600 pointer-events-none" />
+                        )}
+                      </div>
+                      {!verifying && verifyError && (
+                        <p className="text-sm text-destructive flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4 shrink-0" /> {verifyError}
+                        </p>
+                      )}
+                      {!verifying && verified && (
+                        <>
+                          <p className="text-sm text-emerald-700 font-medium flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 shrink-0" /> TM card verified
+                          </p>
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label className="text-xs font-semibold">Cardholder name</Label>
+                              <Input
+                                value={tmPassengerName}
+                                onChange={(e) => setTmPassengerName(e.target.value)}
+                                placeholder="Name on card"
+                                className="rounded-xl h-11"
+                                autoComplete="off"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs font-semibold">Expiry date</Label>
+                              <Input
+                                type="date"
+                                value={tmExpiryDate}
+                                onChange={(e) => setTmExpiryDate(e.target.value)}
+                                className="rounded-xl h-11"
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-2 pt-1">
+                            <Label className="text-xs font-semibold">Pay remainder with</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Council covers the TM subsidy — choose how you&apos;ll pay your share. Cash is always available for TM remainder.
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                              {tmRemainderMethods.map((pm) => (
+                                <button
+                                  key={pm.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setTmRemainder(pm.value as TmRemainderMethod);
+                                    setTmRemainderRef("");
+                                    setTmRemainderError(null);
+                                    setTmRemainderVerified(pm.value === "cash" || pm.value === "card");
+                                  }}
+                                  className={`flex items-center gap-2 px-3 py-2 rounded-xl border font-medium text-sm transition-colors ${
+                                    tmRemainder === pm.value
+                                      ? "bg-primary/10 text-foreground border-primary"
+                                      : "bg-background text-muted-foreground border-border hover:border-foreground/30"
+                                  }`}
+                                >
+                                  {pm.icon}
+                                  <span className="leading-tight">{pm.label}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          {tmRemainder !== "cash" && tmRemainder !== "card" && (
+                            <div className="space-y-2">
+                              <div className="relative">
+                                <Input
+                                  value={tmRemainderRef}
+                                  onChange={(e) => setTmRemainderRef(e.target.value)}
+                                  placeholder={
+                                    PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.placeholder ??
+                                    "Reference"
+                                  }
+                                  className="rounded-xl h-11 pr-10"
+                                  autoComplete="off"
+                                />
+                                {tmRemainderVerifying && (
+                                  <Loader2 className="absolute right-3 top-3 w-5 h-5 animate-spin text-muted-foreground pointer-events-none" />
+                                )}
+                                {!tmRemainderVerifying && tmRemainderVerified && (
+                                  <CheckCircle2 className="absolute right-3 top-3 w-5 h-5 text-emerald-600 pointer-events-none" />
+                                )}
+                              </div>
+                              {!tmRemainderVerifying && tmRemainderError && (
+                                <p className="text-sm text-destructive flex items-center gap-1.5">
+                                  <AlertTriangle className="w-4 h-4 shrink-0" /> {tmRemainderError}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                          {tmRemainder === "cash" && (
+                            <p className="text-xs text-muted-foreground">
+                              Pay your TM co-payment in cash to the driver at the end of the trip.
+                            </p>
+                          )}
+                          {tmRemainder === "card" && (
+                            <p className="text-xs text-muted-foreground">
+                              Your TM co-payment will be charged by card at checkout on the next step.
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {paymentMethod !== "card" && paymentMethod !== "cash" && paymentMethod !== "tm" && (() => {
                     const pm = availablePaymentMethods.find((m) => m.value === paymentMethod)!;
                     return (
                       <div className="space-y-2">
@@ -1421,18 +1692,6 @@ export default function BookPage() {
                       </div>
                     );
                   })()}
-
-                  {paymentMethod === "card" && (
-                    <>
-                      <p className="text-xs text-muted-foreground">{PAYMENT_METHODS[0].help}</p>
-                      <div className="rounded-xl border border-amber-200/80 bg-amber-50/80 p-3 text-xs text-amber-950 flex items-start gap-2">
-                        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-                        <span>
-                          Cancel before a driver is assigned and the fare goes to your BookaWaka wallet (phone-linked credit), not back to your card. No credit after a driver is assigned.
-                        </span>
-                      </div>
-                    </>
-                  )}
                 </div>
 
                 {error && (
@@ -1533,7 +1792,11 @@ export default function BookPage() {
                   value={
                     walletCoversFull && useWalletCredit
                       ? "BookaWaka Wallet"
-                      : paymentMethod === "card"
+                      : paymentMethod === "tm"
+                      ? `Total Mobility — remainder ${PAYMENT_METHODS.find((m) => m.value === tmRemainder)?.label ?? tmRemainder}${
+                          paymentRef ? ` · card ${paymentRef}` : ""
+                        }`
+                      : effectiveCheckoutMethod === "card"
                       ? "Card (Stripe)"
                       : `${PAYMENT_METHODS.find((m) => m.value === paymentMethod)?.label ?? paymentMethod}${paymentRef ? ` — ${paymentRef}` : ""}`
                   }
@@ -1587,7 +1850,7 @@ export default function BookPage() {
                           )}
                         </div>
                       </div>
-                      {!walletLoading && walletBalance > 0 && hasAmount && paymentMethod === "card" && (
+                      {!walletLoading && walletBalance > 0 && hasAmount && effectiveCheckoutMethod === "card" && (
                         <div className="flex items-center gap-2 shrink-0">
                           <Label htmlFor="use-wallet-credit" className="text-xs font-bold text-emerald-800 cursor-pointer">
                             Use wallet credit
@@ -1622,12 +1885,12 @@ export default function BookPage() {
                       No card required — fare will be deducted from your BookaWaka wallet.
                     </p>
                   </>
-                ) : paymentMethod === "card" ? (
+                ) : effectiveCheckoutMethod === "card" ? (
                   hasAmount ? (
                     <>
                       <Button
                         onClick={handlePayByCard}
-                        disabled={submittingCard}
+                        disabled={submittingCard || (paymentMethod === "tm" && !tmPaymentReady)}
                         size="lg"
                         className="w-full bg-accent text-accent-foreground hover:bg-accent/90 rounded-full h-14 font-extrabold text-base shadow-lg"
                       >
@@ -1657,7 +1920,7 @@ export default function BookPage() {
                 ) : (
                   <Button
                     onClick={handleConfirmBooking}
-                    disabled={!verified || submitting}
+                    disabled={!verified || submitting || (paymentMethod === "tm" && !tmPaymentReady)}
                     size="lg"
                     className="w-full bg-accent text-accent-foreground hover:bg-accent/90 rounded-full h-14 font-extrabold text-base shadow-lg disabled:opacity-50"
                   >

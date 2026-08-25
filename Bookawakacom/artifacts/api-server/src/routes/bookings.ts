@@ -133,6 +133,9 @@ bookingsRouter.post("/bookings", async (req, res) => {
     tmCardNumber,
     giftCardCode,
     useWallet,
+    isTM,
+    tmCardName,
+    tmCardExpiry,
   } = req.body as {
     jobId?: string;
     passengerKey?: string;
@@ -163,6 +166,9 @@ bookingsRouter.post("/bookings", async (req, res) => {
     tmCardNumber?: string;
     giftCardCode?: string;
     useWallet?: boolean;
+    isTM?: boolean;
+    tmCardName?: string;
+    tmCardExpiry?: string;
   };
 
   if (!companyId || !passengerName || !passengerPhone || !pickAddress || !dropAddress) {
@@ -434,8 +440,16 @@ bookingsRouter.post("/bookings", async (req, res) => {
     ...(restaurantId ? { RestaurantId: restaurantId, RestaurantName: restaurantName ?? "" } : {}),
     ...(orderItems && orderItems.length > 0 ? { OrderItems: orderItems } : {}),
     ...(accountNumber ? { accountNumber } : {}),
-    ...(tmCardNumber ? { tmCardNumber } : {}),
+    ...(tmCardNumber ? { tmCardNumber, TmCardNumber: tmCardNumber } : {}),
     ...(giftCardCode ? { giftCardCode } : {}),
+    ...(isTM
+      ? {
+          isTM: true,
+          IsTM: true,
+          ...(tmCardName ? { tmCardName, TmCardName: tmCardName } : {}),
+          ...(tmCardExpiry ? { tmCardExpiry, TmCardExpiry: tmCardExpiry } : {}),
+        }
+      : {}),
   };
 
   try {
