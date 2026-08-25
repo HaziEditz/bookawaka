@@ -322,7 +322,7 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
         Number(
           existing.NotifyDispatchBeforeMinutes ??
             existing.DispatchTimebefore ??
-            paidBooking.NotifyDispatchBeforeMinutes ??
+            existing.NotifyDispatchBefore ??
             30,
         ) || 30;
       const notifyAtMs = scheduledMs - leadMins * 60 * 1000;
