@@ -47,6 +47,8 @@ import TowRequestPage from "@/pages/TowRequestPage";
 import TowTrackPage from "@/pages/TowTrackPage";
 import PaymentSuccessPage from "@/pages/PaymentSuccessPage";
 import PaymentCancelPage from "@/pages/PaymentCancelPage";
+import PassengerAppReturnPage from "@/pages/PassengerAppReturnPage";
+import PassengerAppCancelPage from "@/pages/PassengerAppCancelPage";
 
 const queryClient = new QueryClient();
 
@@ -1083,6 +1085,8 @@ function Router() {
       <Route path="/booking-success" component={PaymentSuccessPage} />
       <Route path="/payment-success" component={PaymentSuccessPage} />
       <Route path="/payment-cancel" component={PaymentCancelPage} />
+      <Route path="/passenger-app-return" component={PassengerAppReturnPage} />
+      <Route path="/passenger-app-cancel" component={PassengerAppCancelPage} />
       <Route path="/" component={Home} />
       <Route component={NotFound} />
     </Switch>

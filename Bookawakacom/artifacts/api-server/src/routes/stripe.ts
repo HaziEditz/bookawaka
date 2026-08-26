@@ -435,14 +435,48 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const isScheduled = Number.isFinite(scheduledMs) && scheduledMs > Date.now() + 60_000;
     const postPayStatus = isScheduled ? "Scheduled" : "Pending";
 
+    // Card + quote = already paid fixed fare (website bookings stamp this at create;
+    // passenger-app jobs historically omitted it → driver ran Tariff 1 meter).
+    const fareNum = Number(
+      existing.CustomeRate ??
+        existing.EstimatedFare ??
+        existing.estimatedFare ??
+        existing.Fare ??
+        existing.fare ??
+        0,
+    );
+    const fixedFareFields =
+      Number.isFinite(fareNum) && fareNum > 0
+        ? {
+            TarriffId: "-1",
+            TariffId: "-1",
+            tariffId: "-1",
+            TarriffType: "Fixed",
+            TariffType: "Fixed",
+            TariffName: "Fixed",
+            tariffName: "Fixed",
+            CustomeRate: fareNum,
+            Fare: String(fareNum),
+            EstimatedFare: fareNum,
+            estimatedFare: fareNum,
+            isFixedPrice: true,
+            isPrePaid: true,
+          }
+        : { isPrePaid: true };
+
     const paidBooking = {
       ...existing,
       ...walletFields,
       ...commissionFields,
+      ...fixedFareFields,
       Status: postPayStatus,
       BookingStatus: postPayStatus,
       paymentMethod: "card",
+      PaymentMethod: "card",
+      paymentType: "card",
+      PaymentType: "card",
       paymentStatus: "paid",
+      PaymentStatus: "paid",
       stripeSessionId: session.id,
       paidAt,
     };
@@ -450,10 +484,15 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const paidFields = {
       ...walletFields,
       ...commissionFields,
+      ...fixedFareFields,
       Status: postPayStatus,
       BookingStatus: postPayStatus,
       paymentMethod: "card",
+      PaymentMethod: "card",
+      paymentType: "card",
+      PaymentType: "card",
       paymentStatus: "paid",
+      PaymentStatus: "paid",
       stripeSessionId: session.id,
       paidAt,
     };
