@@ -167,14 +167,89 @@ function getCustomerWebUrl(req?: { get?: (name: string) => string | undefined; p
   return "";
 }
 
+/** Allowed Stripe return hosts for https success/cancel overrides (website). */
+const ALLOWED_RETURN_HOSTS = new Set([
+  "bookawaka-production.up.railway.app",
+  "bookawaka.com",
+  "www.bookawaka.com",
+]);
+
+/** Passenger app custom scheme (must match app.json scheme). */
+const ALLOWED_APP_SCHEMES = new Set(["passenger-app:"]);
+
+/**
+ * Optional client-supplied Stripe return URLs (passenger app deep links).
+ * Reject anything outside the allowlist so this cannot become an open redirect.
+ * Website clients omit these → defaults stay on the customer web origin.
+ */
+function resolveStripeReturnUrls(
+  req: { get?: (name: string) => string | undefined; protocol?: string },
+  body: { successUrl?: string; cancelUrl?: string },
+  bookingId: string,
+  cid: string,
+): { success_url: string; cancel_url: string; returnBase: string } | { error: string } {
+  const customerWebUrl = getCustomerWebUrl(req);
+
+  const tryParseAllowed = (raw: string | undefined): string | null => {
+    const t = String(raw || "").trim();
+    if (!t) return null;
+    try {
+      const u = new URL(t);
+      if (ALLOWED_APP_SCHEMES.has(u.protocol)) return t;
+      if (u.protocol === "https:" && ALLOWED_RETURN_HOSTS.has(u.hostname.toLowerCase())) return t;
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const customSuccess = tryParseAllowed(body.successUrl);
+  const customCancel = tryParseAllowed(body.cancelUrl);
+
+  if (body.successUrl && !customSuccess) {
+    return { error: "successUrl is not an allowed return URL" };
+  }
+  if (body.cancelUrl && !customCancel) {
+    return { error: "cancelUrl is not an allowed return URL" };
+  }
+
+  if (body.successUrl || body.cancelUrl) {
+    if (!customSuccess || !customCancel) {
+      return {
+        error: "Both successUrl and cancelUrl are required when overriding Stripe return URLs",
+      };
+    }
+    return {
+      success_url: customSuccess,
+      cancel_url: customCancel,
+      returnBase: customSuccess,
+    };
+  }
+
+  if (!customerWebUrl) {
+    return {
+      error:
+        "Payment redirect URL is not configured. Use https://bookawaka-production.up.railway.app (www.bookawaka.com currently points at a dead Railway service).",
+    };
+  }
+
+  return {
+    success_url: `${customerWebUrl}/booking-success?booking=${bookingId}&cid=${encodeURIComponent(cid)}&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${customerWebUrl}/book`,
+    returnBase: customerWebUrl,
+  };
+}
+
 stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
-  const { cid, bookingId, description, amount, currency, email } = req.body as {
+  const { cid, bookingId, description, amount, currency, email, successUrl, cancelUrl } = req.body as {
     cid?: string;
     bookingId?: string;
     description?: string;
     amount?: number;
     currency?: string;
     email?: string;
+    successUrl?: string;
+    cancelUrl?: string;
   };
 
   if (!cid || !bookingId || !amount || !email) {
@@ -193,13 +268,10 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
     const Stripe = (await import("stripe")).default;
     const stripe = new Stripe(payCtx.secretKey, { apiVersion: "2026-04-22.dahlia" });
 
-    const customerWebUrl = getCustomerWebUrl(req);
-    if (!customerWebUrl) {
-      req.log.error({ cid }, "No usable public web origin for Stripe return URLs");
-      res.status(503).json({
-        error:
-          "Payment redirect URL is not configured. Use https://bookawaka-production.up.railway.app (www.bookawaka.com currently points at a dead Railway service).",
-      });
+    const returns = resolveStripeReturnUrls(req, { successUrl, cancelUrl }, bookingId, cid);
+    if ("error" in returns) {
+      req.log.error({ cid, err: returns.error }, "No usable Stripe return URLs");
+      res.status(503).json({ error: returns.error });
       return;
     }
 
@@ -227,8 +299,8 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
         type: "booking_payment",
         stripeMode: payCtx.mode ?? "direct",
       },
-      success_url: `${customerWebUrl}/booking-success?booking=${bookingId}&cid=${encodeURIComponent(cid)}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${customerWebUrl}/book`,
+      success_url: returns.success_url,
+      cancel_url: returns.cancel_url,
     };
 
     if (payCtx.mode === "connect" && payCtx.connectAccountId) {
@@ -264,7 +336,7 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
     const session = await stripe.checkout.sessions.create(sessionParams);
 
     req.log.info(
-      { bookingId, cid, sessionId: session.id, returnBase: customerWebUrl },
+      { bookingId, cid, sessionId: session.id, returnBase: returns.returnBase },
       "Stripe Checkout session created",
     );
     res.json({
@@ -272,7 +344,7 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
       url: session.url,
       sessionId: session.id,
       // Non-secret diagnostic so clients/ops can verify return host is the live app.
-      returnBase: customerWebUrl,
+      returnBase: returns.returnBase,
     });
   } catch (err: any) {
     req.log.error({ err }, "POST /stripe/create-booking-payment error");
