@@ -1,11 +1,13 @@
-import { useEffect } from "react";
 import { CheckCircle2, Navigation, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
  * HTTPS landing for native passenger-app Stripe Checkout.
- * Custom Tabs / AuthSession completes on this URL (scheme redirects show
- * Chrome "site can't be reached"). Deep-link is a best-effort fallback.
+ *
+ * AuthSession / Custom Tabs complete on this HTTPS URL — that is the real
+ * handoff back into the app. Do NOT auto-navigate to passenger-app:// here:
+ * Chrome still briefly shows "Page can't be found" / site-unreachable when a
+ * Custom Tab tries to load an unknown custom scheme. Keep a manual button only.
  */
 export default function PassengerAppReturnPage() {
   const params = new URLSearchParams(window.location.search);
@@ -14,18 +16,6 @@ export default function PassengerAppReturnPage() {
   const sessionId = params.get("session_id") ?? "";
 
   const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&session_id=${encodeURIComponent(sessionId)}`;
-
-  useEffect(() => {
-    // Best-effort handoff if AuthSession did not already dismiss the browser.
-    const t = window.setTimeout(() => {
-      try {
-        window.location.href = deepLink;
-      } catch {
-        /* ignore */
-      }
-    }, 400);
-    return () => window.clearTimeout(t);
-  }, [deepLink]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted/30 flex flex-col">
@@ -48,7 +38,8 @@ export default function PassengerAppReturnPage() {
               Payment confirmed
             </h1>
             <p className="text-muted-foreground font-medium mb-6 leading-relaxed">
-              Returning you to the BookaWaka passenger app…
+              You can close this window — returning you to the BookaWaka passenger app.
+              If the app does not open automatically, tap the button below.
             </p>
             {bookingId && (
               <div className="bg-muted/60 border border-border rounded-xl px-5 py-3 mb-6 text-sm text-muted-foreground">
