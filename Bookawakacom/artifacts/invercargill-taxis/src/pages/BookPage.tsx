@@ -993,9 +993,18 @@ export default function BookPage() {
           email: form.passengerEmail,
         }),
       });
-      const stripeData = await stripeRes.json();
+      let stripeData: { error?: string; url?: string; returnBase?: string } = {};
+      try {
+        stripeData = await stripeRes.json();
+      } catch {
+        throw new Error(
+          "Card payment server returned a non-JSON response. If you opened www.bookawaka.com, switch to https://bookawaka-production.up.railway.app/book — www currently points at a dead Railway service (Application not found).",
+        );
+      }
       if (!stripeRes.ok) throw new Error(stripeData.error ?? "Could not start card payment");
-      if (!stripeData.url) throw new Error("Card checkout did not return a payment URL. Please try again or use another payment method.");
+      if (!stripeData.url || !/^https:\/\/checkout\.stripe\.com\//i.test(stripeData.url)) {
+        throw new Error("Card checkout did not return a Stripe payment URL. Please try again or use another payment method.");
+      }
       (window.top ?? window).location.href = stripeData.url;
     } catch (err: any) {
       handleBookingError(err);

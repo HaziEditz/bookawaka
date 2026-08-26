@@ -76,12 +76,49 @@ async function applyPendingWalletDebit(
   };
 }
 
-function getCustomerWebUrl(): string {
-  const explicit = process.env.CUSTOMER_WEB_URL?.trim();
-  if (explicit) return explicit.replace(/\/$/, "");
-  const domain = process.env.REPLIT_DOMAINS?.split(",")[0] ?? process.env.REPLIT_DEV_DOMAIN;
-  if (!domain) return "";
-  return domain.startsWith("http") ? domain.replace(/\/$/, "") : `https://${domain}`;
+/**
+ * Public web origin for Stripe success/cancel redirects.
+ *
+ * Evidence (2026-08-26): www.bookawaka.com CNAMEs to zy36s73i.up.railway.app which
+ * returns Railway `Application not found`. Prefer the request Host (the working app
+ * the passenger is actually on, e.g. bookawaka-production.up.railway.app) over a
+ * stale CUSTOMER_WEB_URL that points at the dead CNAME.
+ */
+function normalizePublicOrigin(raw: string | undefined | null): string {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  const withScheme = /^https?:\/\//i.test(t) ? t : `https://${t}`;
+  try {
+    const u = new URL(withScheme);
+    if (!u.hostname) return "";
+    // Known-dead Railway service previously bound to www.bookawaka.com
+    if (/^zy36s73i\.up\.railway\.app$/i.test(u.hostname)) return "";
+    return `${u.protocol}//${u.host}`.replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function getCustomerWebUrl(req?: { get?: (name: string) => string | undefined; protocol?: string }): string {
+  const xfHost = (req?.get?.("x-forwarded-host") || "").split(",")[0]?.trim();
+  const host = xfHost || (req?.get?.("host") || "").trim();
+  const xfProto = (req?.get?.("x-forwarded-proto") || "").split(",")[0]?.trim();
+  const proto = xfProto || (req?.protocol === "http" ? "http" : "https");
+  const fromRequest = host ? normalizePublicOrigin(`${proto}://${host}`) : "";
+
+  const candidates = [
+    // Prefer the live request host first — matches the SPA the user is booking on.
+    fromRequest,
+    normalizePublicOrigin(process.env.CUSTOMER_WEB_URL),
+    normalizePublicOrigin(process.env.RAILWAY_PUBLIC_DOMAIN),
+    normalizePublicOrigin(process.env.RAILWAY_STATIC_URL),
+    normalizePublicOrigin(process.env.REPLIT_DOMAINS?.split(",")[0]),
+    normalizePublicOrigin(process.env.REPLIT_DEV_DOMAIN),
+  ];
+  for (const c of candidates) {
+    if (c) return c;
+  }
+  return "";
 }
 
 stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
@@ -110,10 +147,13 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
     const Stripe = (await import("stripe")).default;
     const stripe = new Stripe(payCtx.secretKey, { apiVersion: "2026-04-22.dahlia" });
 
-    const customerWebUrl = getCustomerWebUrl();
+    const customerWebUrl = getCustomerWebUrl(req);
     if (!customerWebUrl) {
-      req.log.error({ cid }, "CUSTOMER_WEB_URL not configured");
-      res.status(503).json({ error: "Payment redirect URL is not configured." });
+      req.log.error({ cid }, "No usable public web origin for Stripe return URLs");
+      res.status(503).json({
+        error:
+          "Payment redirect URL is not configured. Use https://bookawaka-production.up.railway.app (www.bookawaka.com currently points at a dead Railway service).",
+      });
       return;
     }
 
@@ -177,8 +217,17 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
 
     const session = await stripe.checkout.sessions.create(sessionParams);
 
-    req.log.info({ bookingId, cid, sessionId: session.id }, "Stripe Checkout session created");
-    res.json({ ok: true, url: session.url, sessionId: session.id });
+    req.log.info(
+      { bookingId, cid, sessionId: session.id, returnBase: customerWebUrl },
+      "Stripe Checkout session created",
+    );
+    res.json({
+      ok: true,
+      url: session.url,
+      sessionId: session.id,
+      // Non-secret diagnostic so clients/ops can verify return host is the live app.
+      returnBase: customerWebUrl,
+    });
   } catch (err: any) {
     req.log.error({ err }, "POST /stripe/create-booking-payment error");
     res.status(500).json({ error: err.message ?? "Could not create payment session" });
