@@ -539,9 +539,16 @@ bookingsRouter.post("/bookings", async (req, res) => {
     // record landing in pendingjobs, so we skip website emails to avoid double-sending.
     // Scheduled cash bookings no longer go to pendingjobs at booking time, so the SA
     // portal will NOT fire — we must send the company email ourselves.
-    // Card payment bookings also always get website emails.
-    const saSendsEmails = !isCardPayment && !isScheduled;
-    if (!saSendsEmails) {
+    // Card (PendingPayment): NEVER email at create — "Awaiting card payment" was firing
+    // before Stripe confirmed. Confirmation emails go out from verify-and-dispatch / webhook.
+    if (isCardPayment) {
+      req.log.info(
+        { bookingId },
+        "Skipping website emails at create — card hold; emails after Stripe confirms",
+      );
+    } else if (!isScheduled) {
+      req.log.info({ bookingId }, "Skipping website emails — SA portal handles ASAP cash booking notifications");
+    } else {
       sendBookingCreatedEmails({
         booking,
         companyId,
@@ -549,11 +556,9 @@ bookingsRouter.post("/bookings", async (req, res) => {
         companyEmail,
         passengerEmail,
         isScheduled,
-        isCardPayment,
+        isCardPayment: false,
         log: req.log,
       }).catch((e) => req.log.error({ e }, "Email send failed"));
-    } else {
-      req.log.info({ bookingId }, "Skipping website emails — SA portal handles ASAP cash booking notifications");
     }
 
     // Food orders: notify SA SQL dispatch API so they appear in the food panel

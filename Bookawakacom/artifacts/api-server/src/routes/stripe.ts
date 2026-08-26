@@ -8,8 +8,54 @@ import {
   resolveTaxiCommissionPct,
 } from "../lib/stripe-commission";
 import { registerScheduledDispatch } from "../lib/scheduler";
+import { sendBookingCreatedEmails } from "../lib/bookingNotifyEmails";
 
 const stripeRouter = Router();
+
+/**
+ * Fire company + passenger confirmation emails only after Stripe has confirmed payment.
+ * Idempotent via allbookings.bookingEmailsSentAt.
+ */
+async function sendCardPaidBookingEmails(opts: {
+  db: ReturnType<typeof getDatabase>;
+  booking: Record<string, any>;
+  companyId: string;
+  bookingId: string;
+  isScheduled: boolean;
+  log: any;
+}): Promise<void> {
+  const { db, booking, companyId, bookingId, isScheduled, log } = opts;
+  if (booking.bookingEmailsSentAt) {
+    log.info({ bookingId, companyId }, "card paid emails already sent — skip");
+    return;
+  }
+  const passengerEmail =
+    booking.PassengerEmail || booking.passengerEmail || booking.Email || undefined;
+  const companyName =
+    booking.CompanyName || booking.companyName || booking.company_name || undefined;
+  const companyEmail =
+    booking.CompanyEmail || booking.companyEmail || booking.company_email || undefined;
+
+  await sendBookingCreatedEmails({
+    booking: {
+      ...booking,
+      paymentMethod: "card",
+      paymentStatus: "paid",
+    },
+    companyId,
+    companyName,
+    companyEmail,
+    passengerEmail,
+    isScheduled,
+    // Paid — show Card (Stripe), not "Awaiting card payment".
+    isCardPayment: false,
+    log,
+  });
+
+  await db.ref(`allbookings/${companyId}/${bookingId}`).update({
+    bookingEmailsSentAt: new Date().toISOString(),
+  });
+}
 
 /** Debit walletAmountPending after card payment confirms (partial wallet + card bookings). */
 async function applyPendingWalletDebit(
@@ -366,6 +412,16 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
 
     await Promise.all(writes);
 
+    // Confirmation emails only after real Stripe payment (not at booking create).
+    sendCardPaidBookingEmails({
+      db,
+      booking: paidBooking,
+      companyId,
+      bookingId,
+      isScheduled,
+      log: req.log,
+    }).catch((e) => req.log.error({ e, bookingId }, "card paid email send failed"));
+
     if (isScheduled) {
       const leadMins =
         Number(
@@ -503,6 +559,17 @@ stripeRouter.post("/stripe/webhook", async (req, res) => {
               });
             }
             await Promise.all(writes);
+
+            sendCardPaidBookingEmails({
+              db,
+              booking: paidBooking,
+              companyId,
+              bookingId,
+              isScheduled,
+              log: req.log,
+            }).catch((e) =>
+              req.log.error({ e, bookingId }, "webhook card paid email send failed"),
+            );
 
             req.log.info(
               { bookingId, companyId, sessionId: session.id, postPayStatus },
