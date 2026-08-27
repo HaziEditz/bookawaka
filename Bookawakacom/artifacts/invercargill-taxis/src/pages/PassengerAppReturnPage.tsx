@@ -17,17 +17,9 @@ export default function PassengerAppReturnPage() {
 
   const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&session_id=${encodeURIComponent(sessionId)}`;
 
-  // AuthSession / Custom Tabs complete when this HTTPS URL loads — try close as a
-  // best-effort nudge on browsers that leave the tab open after the redirect match.
-  if (typeof window !== "undefined") {
-    window.setTimeout(() => {
-      try {
-        window.close();
-      } catch {
-        /* ignore */
-      }
-    }, 400);
-  }
+  // Prefer bringing the app forward without relying on Custom Tab auto-dismiss.
+  // Route stripe-return MUST exist in the passenger Expo Router tree.
+  // AuthSession / Custom Tabs also complete when this HTTPS URL loads.
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted/30 flex flex-col">
