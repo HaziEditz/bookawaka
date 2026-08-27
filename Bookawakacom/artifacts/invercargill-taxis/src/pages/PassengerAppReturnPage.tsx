@@ -17,6 +17,18 @@ export default function PassengerAppReturnPage() {
 
   const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&session_id=${encodeURIComponent(sessionId)}`;
 
+  // AuthSession / Custom Tabs complete when this HTTPS URL loads — try close as a
+  // best-effort nudge on browsers that leave the tab open after the redirect match.
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => {
+      try {
+        window.close();
+      } catch {
+        /* ignore */
+      }
+    }, 400);
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted/30 flex flex-col">
       <header className="bg-foreground text-white px-6 py-4 flex items-center gap-3 shadow-xl">
