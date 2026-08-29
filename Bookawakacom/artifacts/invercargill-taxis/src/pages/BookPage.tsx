@@ -268,9 +268,14 @@ export default function BookPage() {
   const tmRemainderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickCoords, setPickCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [dropCoords, setDropCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [stops, setStops] = useState<Array<{ id: string; address: string; lat: number; lng: number }>>([]);
+  const [addingStop, setAddingStop] = useState(false);
+  const [stopDraft, setStopDraft] = useState("");
+  const stopDraftRef = useRef("");
+  const [stopAddressActive, setStopAddressActive] = useState(false);
   const [pickAddressActive, setPickAddressActive] = useState(false);
   const [dropAddressActive, setDropAddressActive] = useState(false);
-  const mapPointerEventsDisabled = pickAddressActive;
+  const mapPointerEventsDisabled = pickAddressActive || stopAddressActive;
   const [fareEstimate, setFareEstimate] = useState<{ estimate: number; distanceKm: number } | null>(null);
   const [fareLoading, setFareLoading] = useState(false);
 
@@ -777,6 +782,9 @@ export default function BookPage() {
         pickLng: pickCoords?.lng ?? 0,
         dropLat: dropCoords?.lat ?? 0,
         dropLng: dropCoords?.lng ?? 0,
+        stops: stops.length
+          ? stops.map((s) => ({ address: s.address, lat: s.lat, lng: s.lng }))
+          : undefined,
         restaurantId: selectedService === "food" ? selectedRestaurant?.id : undefined,
         restaurantName: selectedService === "food" ? selectedRestaurant?.name : undefined,
         orderItems: selectedService === "food" && cartItems.length > 0 ? cartItems : undefined,
@@ -1375,6 +1383,65 @@ export default function BookPage() {
                     required
                   />
                 </div>
+
+                {selectedService === "taxi" && (
+                  <div className={`space-y-2 relative ${stopAddressActive ? "z-[65]" : ""}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="font-semibold text-sm">Stops (optional)</Label>
+                      {!addingStop && (
+                        <button
+                          type="button"
+                          className="text-xs font-semibold text-primary"
+                          onClick={() => setAddingStop(true)}
+                        >
+                          + Add a stop
+                        </button>
+                      )}
+                    </div>
+                    {stops.map((s) => (
+                      <div
+                        key={s.id}
+                        className="rounded-xl h-11 border border-border bg-muted/40 flex items-center px-3 text-sm gap-2"
+                      >
+                        <MapPin className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                        <span className="truncate flex-1">{s.address}</span>
+                        <button
+                          type="button"
+                          className="text-xs text-muted-foreground hover:text-destructive"
+                          onClick={() => setStops((prev) => prev.filter((x) => x.id !== s.id))}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                    {addingStop && (
+                      <AddressInput
+                        id="stopAddress"
+                        name="stopAddress"
+                        value={stopDraft}
+                        onChange={(val) => {
+                          stopDraftRef.current = val;
+                          setStopDraft(val);
+                        }}
+                        onCoordChange={(lat, lng) => {
+                          if (!lat || !lng) return;
+                          const address = stopDraftRef.current.trim();
+                          if (!address) return;
+                          setStops((prev) => [
+                            ...prev,
+                            { id: `stop-${Date.now()}`, address, lat, lng },
+                          ]);
+                          stopDraftRef.current = "";
+                          setStopDraft("");
+                          setAddingStop(false);
+                          setStopAddressActive(false);
+                        }}
+                        onActiveChange={setStopAddressActive}
+                        placeholder="Add a stop along the way…"
+                      />
+                    )}
+                  </div>
+                )}
 
                 {/* Trip price — single read-only display (no tariff names, not editable) */}
                 {selectedService === "taxi" && (fareLoading || fareEstimate) && (

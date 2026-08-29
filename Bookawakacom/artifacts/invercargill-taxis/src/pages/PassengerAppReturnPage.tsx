@@ -4,10 +4,10 @@ import { Button } from "@/components/ui/button";
 /**
  * HTTPS landing for native passenger-app Stripe Checkout.
  *
- * AuthSession / Custom Tabs complete on this HTTPS URL — that is the real
- * handoff back into the app. Do NOT auto-navigate to passenger-app:// here:
- * Chrome still briefly shows "Page can't be found" / site-unreachable when a
- * Custom Tab tries to load an unknown custom scheme. Keep a manual button only.
+ * AuthSession / Custom Tabs complete on this HTTPS URL. We also deep-link into
+ * passenger-app://stripe-return with booking/cid/session_id so Active Ride
+ * restores when the user taps "Open passenger app" or the OS hands off.
+ * Auto-open once; keep the button as fallback (Chrome may flash briefly).
  */
 export default function PassengerAppReturnPage() {
   const params = new URLSearchParams(window.location.search);
@@ -15,11 +15,23 @@ export default function PassengerAppReturnPage() {
   const cid = params.get("cid") ?? "";
   const sessionId = params.get("session_id") ?? "";
 
-  const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&session_id=${encodeURIComponent(sessionId)}`;
+  const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&session_id=${encodeURIComponent(sessionId)}&kind=success`;
 
-  // Prefer bringing the app forward without relying on Custom Tab auto-dismiss.
-  // Route stripe-return MUST exist in the passenger Expo Router tree.
-  // AuthSession / Custom Tabs also complete when this HTTPS URL loads.
+  // Attempt handoff immediately so "Go back to app" / Custom Tab dismiss still lands in-app.
+  if (typeof window !== "undefined" && bookingId) {
+    try {
+      window.location.href = deepLink;
+    } catch {
+      /* keep button */
+    }
+    window.setTimeout(() => {
+      try {
+        window.location.replace(deepLink);
+      } catch {
+        /* ignore */
+      }
+    }, 400);
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted/30 flex flex-col">

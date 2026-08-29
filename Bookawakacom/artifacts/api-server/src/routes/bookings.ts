@@ -115,6 +115,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     passengerEmail,
     pickAddress,
     dropAddress,
+    stops: stopsRaw,
     scheduledFor,
     notes,
     amount,
@@ -148,6 +149,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     passengerEmail?: string;
     pickAddress?: string;
     dropAddress?: string;
+    stops?: Array<{ address: string; lat?: number; lng?: number }>;
     scheduledFor?: string;
     vehicleType?: string;
     passengers?: number;
@@ -177,6 +179,26 @@ bookingsRouter.post("/bookings", async (req, res) => {
     });
     return;
   }
+
+  const stopList = Array.isArray(stopsRaw)
+    ? stopsRaw
+        .filter((s) => s && String(s.address || "").trim())
+        .map((s) => ({
+          address: String(s.address).trim(),
+          lat: s.lat != null ? Number(s.lat) : null,
+          lng: s.lng != null ? Number(s.lng) : null,
+        }))
+    : [];
+  const nextstopdata = stopList.length
+    ? JSON.stringify(
+        stopList.map((s) => ({
+          address: s.address,
+          lat: s.lat,
+          lng: s.lng,
+        })),
+      )
+    : "";
+  const Stops = stopList.map((s) => s.address);
 
   // Normalise phone to digits-only before any storage. The SA driver app keys
   // passenger ratings (and other passenger lookups) by digits-only phone, so
@@ -387,9 +409,21 @@ bookingsRouter.post("/bookings", async (req, res) => {
     pickAddress, // lowercase alias
     PickLatLng: pickLatLngStr,
     DropLatLng: dropLatLngStr,
+    Nextstop: String(stopList.length),
+    nextstopdata,
+    Stops,
     // Structured location objects (consumed by driver/dispatcher apps)
     pickupLocation: { address: pickAddress, lat: resolvedPick.lat, lng: resolvedPick.lng },
     dropoffLocation: { address: dropAddress, lat: resolvedDrop.lat, lng: resolvedDrop.lng },
+    ...(stopList.length
+      ? {
+          stops: stopList.map((s) => ({
+            address: s.address,
+            lat: s.lat,
+            lng: s.lng,
+          })),
+        }
+      : {}),
     // Prebook flags — SA dispatch app uses these to distinguish ASAP vs pre-booked jobs
     Prebook: isScheduled,
     IsPreBook: isScheduled,

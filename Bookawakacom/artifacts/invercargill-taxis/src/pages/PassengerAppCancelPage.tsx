@@ -6,7 +6,15 @@ export default function PassengerAppCancelPage() {
   const params = new URLSearchParams(window.location.search);
   const bookingId = params.get("booking") ?? "";
   const cid = params.get("cid") ?? "";
-  const deepLink = `passenger-app://stripe-cancel?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}`;
+  const deepLink = `passenger-app://stripe-return?booking=${encodeURIComponent(bookingId)}&cid=${encodeURIComponent(cid)}&kind=cancel`;
+
+  if (typeof window !== "undefined" && bookingId) {
+    try {
+      window.location.href = deepLink;
+    } catch {
+      /* keep button */
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted/30 flex flex-col">
