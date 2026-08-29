@@ -57,6 +57,11 @@ interface Company {
   email?: string;
   /** Free-text hours from companySettings when configured (often empty today). */
   operatingHours?: string;
+  /** ASAP gate: company dispatch console online (activeDispatchers). */
+  dispatchOnline?: boolean;
+  /** ASAP allowed when dispatch online + within operating hours. */
+  asapBookable?: boolean;
+  asapBlockReason?: string;
 }
 
 /**
@@ -102,6 +107,9 @@ function normalizeCompanies(raw: unknown): Company[] {
         c.operatingHours != null && String(c.operatingHours).trim()
           ? String(c.operatingHours).trim()
           : undefined,
+      dispatchOnline: c.dispatchOnline === true,
+      asapBookable: c.asapBookable !== false,
+      asapBlockReason: c.asapBlockReason != null ? String(c.asapBlockReason) : undefined,
     }))
     .filter((c) => c.id);
 }
@@ -911,6 +919,24 @@ export default function BookPage() {
     }
   };
 
+  const assertAsapAllowed = (): boolean => {
+    if (bookingType === "scheduled") return true;
+    if (!selectedCompany) {
+      setError("Please select a company.");
+      return false;
+    }
+    if (selectedCompany.asapBookable === false) {
+      setError(
+        selectedCompany.asapBlockReason === "outside_hours" ||
+          selectedCompany.dispatchOnline === true
+          ? "This company is outside its operating hours. Please schedule for a later time."
+          : "This company's dispatch is offline. Please schedule for a later time, or try again when dispatch is open.",
+      );
+      return false;
+    }
+    return true;
+  };
+
   const handlePayWithWallet = async () => {
     if (!form.passengerEmail.trim()) {
       setError("An email address is required to receive your booking confirmation");
@@ -920,6 +946,7 @@ export default function BookPage() {
       setError("Please enter the fare amount to use wallet credit.");
       return;
     }
+    if (!assertAsapAllowed()) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -948,6 +975,7 @@ export default function BookPage() {
       setError("Please complete Total Mobility card and remainder payment details.");
       return;
     }
+    if (!assertAsapAllowed()) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -973,6 +1001,7 @@ export default function BookPage() {
       setError("Please complete Total Mobility card and remainder payment details.");
       return;
     }
+    if (!assertAsapAllowed()) return;
     const chargeAmount = walletActive ? cardAmountDue : parseFloat(form.amount);
     if (!chargeAmount || chargeAmount <= 0) {
       setError("Please enter the agreed amount to pay by card.");
@@ -1493,6 +1522,14 @@ export default function BookPage() {
                       <CalendarClock className="w-4 h-4" /> Schedule
                     </button>
                   </div>
+                  {bookingType === "now" && selectedCompany?.asapBookable === false && (
+                    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                      {selectedCompany.asapBlockReason === "outside_hours" ||
+                      selectedCompany.dispatchOnline === true
+                        ? "This company is outside its operating hours. Switch to Schedule to book for a later time."
+                        : "This company's dispatch is offline. Switch to Schedule, or try again when dispatch is open."}
+                    </div>
+                  )}
                   {bookingType === "scheduled" && (
                     <div className="space-y-3">
                       <NzDateTimeInput

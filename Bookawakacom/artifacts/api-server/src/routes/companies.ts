@@ -1,5 +1,9 @@
 import { Router } from "express";
 import { getDatabase } from "../lib/firebase";
+import {
+  asapBookingAllowed,
+  isCompanyDispatchOnline,
+} from "../lib/companyBookingAvailability";
 
 const companiesRouter = Router();
 
@@ -22,6 +26,8 @@ companiesRouter.get("/companies", async (req, res) => {
         name: `Company ${id}`,
         services: ["taxi"],
         active: true,
+        dispatchOnline: false,
+        asapBookable: false,
       }));
 
       res.json({ companies });
@@ -35,6 +41,10 @@ companiesRouter.get("/companies", async (req, res) => {
     // Registration historically wrote contact email only to superClients.
     const superSnap = await db.ref("/superClients").once("value");
     const superMap = (superSnap.val() as Record<string, any> | null) ?? {};
+    // ASAP gate: company dispatch console presence (ignore individual drivers).
+    const dispSnap = await db.ref("/activeDispatchers").once("value");
+    const dispMap = (dispSnap.val() as Record<string, any> | null) ?? {};
+    const nowMs = Date.now();
 
     const companies = Object.entries(profiles)
       .filter(([, v]) => v && v.active !== false)
@@ -47,6 +57,14 @@ companiesRouter.get("/companies", async (req, res) => {
           v.operatingHours ??
           v.operating_hours ??
           "";
+        const timezone = String(settings.timezone ?? v.timezone ?? "").trim();
+        const dispatchOnline = isCompanyDispatchOnline(dispMap[id] || null, nowMs);
+        const asap = asapBookingAllowed({
+          dispatchOnline,
+          operatingHours: typeof hours === "string" ? hours : "",
+          timezone: timezone.includes("/") ? timezone : "Pacific/Auckland",
+          isScheduled: false,
+        });
         return {
           id,
           name: v.name ?? settings.name ?? `Company ${id}`,
@@ -64,6 +82,10 @@ companiesRouter.get("/companies", async (req, res) => {
             superClient.contactEmail ||
             "",
           operatingHours: typeof hours === "string" ? hours : "",
+          timezone: timezone.includes("/") ? timezone : "",
+          dispatchOnline,
+          asapBookable: asap.allowed,
+          asapBlockReason: asap.reason,
         };
       });
 
@@ -86,16 +108,40 @@ companiesRouter.get("/public/companies", async (req, res) => {
       return;
     }
 
+    const settingsSnap = await db.ref("/companySettings").once("value");
+    const settingsMap = (settingsSnap.val() as Record<string, any> | null) ?? {};
+    const dispSnap = await db.ref("/activeDispatchers").once("value");
+    const dispMap = (dispSnap.val() as Record<string, any> | null) ?? {};
+    const nowMs = Date.now();
+
     const companies = Object.entries(profiles)
       .filter(([, v]) => v && v.active !== false)
-      .map(([id, v]) => ({
-        id,
-        name: v.name ?? `Company ${id}`,
-        services: v.services ?? ["taxi"],
-        city: v.city ?? "",
-        country: v.country ?? "New Zealand",
-        operatingHours: typeof v.operatingHours === "string" ? v.operatingHours : "",
-      }));
+      .map(([id, v]) => {
+        const settings = settingsMap[id] || {};
+        const hours =
+          settings.operatingHours ??
+          settings.operating_hours ??
+          v.operatingHours ??
+          "";
+        const timezone = String(settings.timezone ?? v.timezone ?? "").trim();
+        const dispatchOnline = isCompanyDispatchOnline(dispMap[id] || null, nowMs);
+        const asap = asapBookingAllowed({
+          dispatchOnline,
+          operatingHours: typeof hours === "string" ? hours : "",
+          timezone: timezone.includes("/") ? timezone : "Pacific/Auckland",
+        });
+        return {
+          id,
+          name: v.name ?? `Company ${id}`,
+          services: v.services ?? ["taxi"],
+          city: v.city ?? "",
+          country: v.country ?? "New Zealand",
+          operatingHours: typeof hours === "string" ? hours : "",
+          dispatchOnline,
+          asapBookable: asap.allowed,
+          asapBlockReason: asap.reason,
+        };
+      });
 
     res.json({ companies });
   } catch (err: any) {
