@@ -8,7 +8,8 @@ export const DISPATCH_HEARTBEAT_STALE_MS = 5 * 60 * 1000;
 export type ActiveDispatcherSession = {
   lastSeen?: number | string | null;
   heartbeat?: number | string | null;
-  active?: boolean | string | null;
+  /** Firebase may store bool, "false", or 0/1. */
+  active?: boolean | string | number | null;
   [key: string]: unknown;
 };
 
