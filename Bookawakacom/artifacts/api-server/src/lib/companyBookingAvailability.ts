@@ -3,7 +3,13 @@
  * Mirrored in passenger-app/lib/companyBookingAvailability.ts — keep in sync.
  */
 
-export const DISPATCH_HEARTBEAT_STALE_MS = 5 * 60 * 1000;
+/**
+ * Heartbeat writes every 60s from the dispatch console, but background browser
+ * tabs throttle timers — a 5-minute stale window false-offlined ASAP on the
+ * Website while Passenger App (live RTDB) still showed online. 12 minutes covers
+ * typical timer throttling without treating a closed console as open for hours.
+ */
+export const DISPATCH_HEARTBEAT_STALE_MS = 12 * 60 * 1000;
 
 export type ActiveDispatcherSession = {
   lastSeen?: number | string | null;

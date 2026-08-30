@@ -349,65 +349,113 @@ export default function BookPage() {
   }, [step, passengerKey]);
 
   useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}api/companies`)
-      .then((r) => r.json())
-      .then((d) => {
-        const list = normalizeCompanies(d.companies);
-        setCompanies(list);
-        // Pre-fill from ?cid=&service=&pickup=&drop= (set by "Book again" from My Rides)
-        const params = new URLSearchParams(window.location.search);
-        const cidParam = params.get("cid");
-        const serviceParam = params.get("service");
-        const pickupParam = params.get("pickup");
-        const dropParam = params.get("drop");
-        if (cidParam) {
-          const company = list.find((c) => c.id === cidParam);
-          if (company) {
-            setSelectedCompany(company);
-            // Only accept the service param if the company actually offers it
-            const validService =
-              serviceParam && company.services.includes(serviceParam)
-                ? serviceParam
-                : null;
-            const prefillAddresses = (svc: string) => {
-              setForm((prev) => ({
-                ...prev,
-                // Food pickup is the restaurant address — don't pre-fill it from the URL
-                pickAddress: svc === "food" ? prev.pickAddress : (pickupParam ?? prev.pickAddress),
-                dropAddress: dropParam ?? prev.dropAddress,
-              }));
-            };
-            if (validService) {
-              setSelectedService(validService);
-              prefillAddresses(validService);
-              // Food needs restaurant selection (step 1.5) before the details form
-              setStep(validService === "food" ? 1.5 : 2);
-            } else if (company.services.length === 1) {
-              const svc = company.services[0];
+    let cancelled = false;
+
+    const applyCompanies = (list: Company[]) => {
+      if (cancelled) return;
+      setCompanies(list);
+      // Keep selectedCompany in sync — a one-shot snapshot froze
+      // asapBookable:false after a brief heartbeat gap (Website bug vs live Pax).
+      setSelectedCompany((prev) => {
+        if (!prev) return prev;
+        const fresh = list.find((c) => c.id === prev.id);
+        return fresh ?? prev;
+      });
+    };
+
+    const loadCompanies = (opts?: { initial?: boolean }) => {
+      const initial = !!opts?.initial;
+      return fetch(`${import.meta.env.BASE_URL}api/companies`)
+        .then(async (r) => {
+          if (!r.ok) throw new Error(`companies HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((d) => {
+          const list = normalizeCompanies(d.companies);
+          applyCompanies(list);
+          if (!initial) return;
+
+          // Pre-fill from ?cid=&service=&pickup=&drop= (set by "Book again" from My Rides)
+          const params = new URLSearchParams(window.location.search);
+          const cidParam = params.get("cid");
+          const serviceParam = params.get("service");
+          const pickupParam = params.get("pickup");
+          const dropParam = params.get("drop");
+          if (cidParam) {
+            const company = list.find((c) => c.id === cidParam);
+            if (company) {
+              setSelectedCompany(company);
+              // Only accept the service param if the company actually offers it
+              const validService =
+                serviceParam && company.services.includes(serviceParam)
+                  ? serviceParam
+                  : null;
+              const prefillAddresses = (svc: string) => {
+                setForm((prev) => ({
+                  ...prev,
+                  // Food pickup is the restaurant address — don't pre-fill it from the URL
+                  pickAddress: svc === "food" ? prev.pickAddress : (pickupParam ?? prev.pickAddress),
+                  dropAddress: dropParam ?? prev.dropAddress,
+                }));
+              };
+              if (validService) {
+                setSelectedService(validService);
+                prefillAddresses(validService);
+                // Food needs restaurant selection (step 1.5) before the details form
+                setStep(validService === "food" ? 1.5 : 2);
+              } else if (company.services.length === 1) {
+                const svc = company.services[0];
+                setSelectedService(svc);
+                prefillAddresses(svc);
+                setStep(svc === "food" ? 1.5 : 2);
+              } else {
+                // Multiple services, none valid in URL — let user pick
+                prefillAddresses("");
+                setStep(1);
+              }
+            }
+          } else if (list.length === 1) {
+            // No URL params but only one company — auto-select and skip the company screen
+            const c = list[0];
+            setSelectedCompany(c);
+            if (c.services.length === 1) {
+              const svc = c.services[0];
               setSelectedService(svc);
-              prefillAddresses(svc);
               setStep(svc === "food" ? 1.5 : 2);
             } else {
-              // Multiple services, none valid in URL — let user pick
-              prefillAddresses("");
               setStep(1);
             }
           }
-        } else if (list.length === 1) {
-          // No URL params but only one company — auto-select and skip the company screen
-          const c = list[0];
-          setSelectedCompany(c);
-          if (c.services.length === 1) {
-            const svc = c.services[0];
-            setSelectedService(svc);
-            setStep(svc === "food" ? 1.5 : 2);
-          } else {
-            setStep(1);
-          }
-        }
-      })
-      .catch(() => setCompanies([]))
-      .finally(() => setLoadingCompanies(false));
+        })
+        .catch(() => {
+          // Do not invent asapBookable:false on network failure — leave prior state.
+          if (initial) setCompanies([]);
+        })
+        .finally(() => {
+          if (initial && !cancelled) setLoadingCompanies(false);
+        });
+    };
+
+    void loadCompanies({ initial: true });
+
+    // Refresh ASAP gate while the book page is open (parity with Passenger live RTDB).
+    const pollMs = 30_000;
+    const pollId = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadCompanies({ initial: false });
+    }, pollMs);
+    const onFocus = () => {
+      void loadCompanies({ initial: false });
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
   }, []);
 
   useEffect(() => {
