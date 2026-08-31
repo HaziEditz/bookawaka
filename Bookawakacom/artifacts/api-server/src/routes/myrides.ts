@@ -81,16 +81,41 @@ myRidesRouter.get("/my-rides", async (req, res) => {
     return;
   }
 
+  const startedAt = Date.now();
+  /** Admin SDK once() can hang indefinitely on some Railway/Firebase pairings — never block the page. */
+  const withTimeout = <T,>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      p.then(
+        (v) => {
+          clearTimeout(t);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(t);
+          reject(e);
+        },
+      );
+    });
+
   try {
     const db = getDatabase();
-    const resolvedKey = await resolvePassengerKey(db, { key, email, phone });
+    const resolvedKey = await withTimeout(
+      resolvePassengerKey(db, { key, email, phone }),
+      8_000,
+      "resolvePassengerKey",
+    );
 
     if (!resolvedKey) {
       res.json({ rides: [], passengerKey: null });
       return;
     }
 
-    const snap = await db.ref(`Passengerjobs/${resolvedKey}`).once("value");
+    const snap = await withTimeout(
+      db.ref(`Passengerjobs/${resolvedKey}`).once("value"),
+      10_000,
+      `Passengerjobs/${resolvedKey}`,
+    );
     const data = snap.val() ?? {};
     const rides = Object.values(data) as any[];
 
@@ -99,65 +124,91 @@ myRidesRouter.get("/my-rides", async (req, res) => {
     // allbookings/{companyId}/{bookingId} — they don't fan-out to Passengerjobs.
     // Without this overlay, the My Rides page shows forever-stale "Pending" rows
     // even when the trip has been Offered / Assigned / Completed in dispatch.
-    // We read allbookings for each ride in parallel and patch the live fields
-    // (Status / status / DriverId / paymentStatus / CancelledAt). Reads are
-    // best-effort: if one fails the original ride is returned unchanged.
-    const overlaid = await Promise.all(
-      rides.map(async (r: any) => {
-        const cid = r?.CompanyId ?? r?.companyId;
-        const bid = r?.BookingId;
-        if (!cid || !bid) return r;
-        try {
-          const liveSnap = await db.ref(`allbookings/${cid}/${bid}`).once("value");
-          const live = liveSnap.val();
-          if (!live || typeof live !== "object") return r;
-          const paxSt = String(r.Status ?? r.status ?? "").toLowerCase();
-          const liveSt = String(live.Status ?? live.status ?? "").toLowerCase();
-          const paxTerminal = paxSt === "cancelled" || paxSt === "canceled" || paxSt === "completed";
-          const liveTerminal =
-            liveSt === "cancelled" ||
-            liveSt === "canceled" ||
-            liveSt === "completed" ||
-            liveSt === "closed" ||
-            liveSt === "noshow" ||
-            liveSt === "no_show";
-          // Half-cancel guard: if Passengerjobs is Cancelled (wallet credited) but
-          // allbookings was healed back to Pending, keep Cancelled for My Rides.
-          const keepPaxStatus = paxTerminal && !liveTerminal;
-          return {
-            ...r,
-            ...(live.Status != null && !keepPaxStatus ? { Status: live.Status } : {}),
-            ...(live.status != null && !keepPaxStatus ? { status: live.status } : {}),
-            ...(keepPaxStatus
-              ? { Status: r.Status ?? "Cancelled", status: r.status ?? "Cancelled" }
-              : {}),
-            ...(live.DriverId ? { DriverId: live.DriverId } : {}),
-            ...(live.paymentStatus ? { paymentStatus: live.paymentStatus } : {}),
-            ...(live.CancelledAt ? { CancelledAt: live.CancelledAt } : {}),
-            ...(live.CancelledBy ? { CancelledBy: live.CancelledBy } : {}),
-            ...(r.CancelledAt && !live.CancelledAt ? { CancelledAt: r.CancelledAt } : {}),
-            ...(r.refundStatus ? { refundStatus: r.refundStatus } : {}),
-            ...(live.Info != null ? { Info: live.Info } : {}),
-            ...(live.Notes != null ? { Notes: live.Notes } : {}),
-            ...(live.PickAddress ? { PickAddress: live.PickAddress } : {}),
-            ...(live.DropAddress ? { DropAddress: live.DropAddress } : {}),
-            ...(live.BookingDateTime ? { BookingDateTime: live.BookingDateTime } : {}),
-            ...(live.Pickingtime ? { Pickingtime: live.Pickingtime } : {}),
-            ...(live.ScheduledFor != null ? { ScheduledFor: live.ScheduledFor } : {}),
-            ...(live.ScheduledForMs != null ? { ScheduledForMs: live.ScheduledForMs } : {}),
-          };
-        } catch (e) {
-          req.log.warn({ e, cid, bid }, "my-rides: allbookings overlay read failed");
-          return r;
-        }
-      })
+    // Reads are best-effort with a hard per-ride timeout — Admin SDK hangs were
+    // observed hanging the whole GET /my-rides for passengers with many jobs.
+    const OVERLAY_TIMEOUT_MS = 2_500;
+    const OVERLAY_CONCURRENCY = 6;
+
+    async function overlayOne(r: any): Promise<any> {
+      const cid = r?.CompanyId ?? r?.companyId;
+      const bid = r?.BookingId;
+      if (!cid || !bid) return r;
+      try {
+        const liveSnap = await withTimeout(
+          db.ref(`allbookings/${cid}/${bid}`).once("value"),
+          OVERLAY_TIMEOUT_MS,
+          `allbookings/${cid}/${bid}`,
+        );
+        const live = liveSnap.val();
+        if (!live || typeof live !== "object") return r;
+        const paxSt = String(r.Status ?? r.status ?? "").toLowerCase();
+        const liveSt = String(live.Status ?? live.status ?? "").toLowerCase();
+        const paxTerminal = paxSt === "cancelled" || paxSt === "canceled" || paxSt === "completed";
+        const liveTerminal =
+          liveSt === "cancelled" ||
+          liveSt === "canceled" ||
+          liveSt === "completed" ||
+          liveSt === "closed" ||
+          liveSt === "noshow" ||
+          liveSt === "no_show";
+        // Half-cancel guard: if Passengerjobs is Cancelled (wallet credited) but
+        // allbookings was healed back to Pending, keep Cancelled for My Rides.
+        const keepPaxStatus = paxTerminal && !liveTerminal;
+        return {
+          ...r,
+          ...(live.Status != null && !keepPaxStatus ? { Status: live.Status } : {}),
+          ...(live.status != null && !keepPaxStatus ? { status: live.status } : {}),
+          ...(keepPaxStatus
+            ? { Status: r.Status ?? "Cancelled", status: r.status ?? "Cancelled" }
+            : {}),
+          ...(live.DriverId ? { DriverId: live.DriverId } : {}),
+          ...(live.paymentStatus ? { paymentStatus: live.paymentStatus } : {}),
+          ...(live.CancelledAt ? { CancelledAt: live.CancelledAt } : {}),
+          ...(live.CancelledBy ? { CancelledBy: live.CancelledBy } : {}),
+          ...(r.CancelledAt && !live.CancelledAt ? { CancelledAt: r.CancelledAt } : {}),
+          ...(r.refundStatus ? { refundStatus: r.refundStatus } : {}),
+          ...(live.Info != null ? { Info: live.Info } : {}),
+          ...(live.Notes != null ? { Notes: live.Notes } : {}),
+          ...(live.PickAddress ? { PickAddress: live.PickAddress } : {}),
+          ...(live.DropAddress ? { DropAddress: live.DropAddress } : {}),
+          ...(live.BookingDateTime ? { BookingDateTime: live.BookingDateTime } : {}),
+          ...(live.Pickingtime ? { Pickingtime: live.Pickingtime } : {}),
+          ...(live.ScheduledFor != null ? { ScheduledFor: live.ScheduledFor } : {}),
+          ...(live.ScheduledForMs != null ? { ScheduledForMs: live.ScheduledForMs } : {}),
+        };
+      } catch (e) {
+        req.log.warn({ e, cid, bid }, "my-rides: allbookings overlay read failed/timed out");
+        return r;
+      }
+    }
+
+    const overlaid: any[] = [];
+    for (let i = 0; i < rides.length; i += OVERLAY_CONCURRENCY) {
+      const chunk = rides.slice(i, i + OVERLAY_CONCURRENCY);
+      const part = await Promise.all(chunk.map(overlayOne));
+      overlaid.push(...part);
+      // Soft overall budget — return what we have rather than hang the client forever.
+      if (Date.now() - startedAt > 18_000) {
+        req.log.warn(
+          { resolvedKey, rideCount: rides.length, done: overlaid.length, ms: Date.now() - startedAt },
+          "my-rides: overall budget hit — returning partial overlay",
+        );
+        // Append remaining rides without overlay so the page still loads.
+        overlaid.push(...rides.slice(overlaid.length));
+        break;
+      }
+    }
+
+    req.log.info(
+      { resolvedKey, rideCount: rides.length, ms: Date.now() - startedAt },
+      "GET /my-rides ok",
     );
 
     // Never cache — this endpoint is polled live to track payment/status changes
     res.setHeader("Cache-Control", "no-store");
     res.json({ rides: overlaid, passengerKey: resolvedKey });
   } catch (err: any) {
-    req.log.error({ err }, "GET /my-rides error");
+    req.log.error({ err, ms: Date.now() - startedAt }, "GET /my-rides error");
     res.status(500).json({ error: err.message });
   }
 });
