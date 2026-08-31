@@ -5,7 +5,7 @@ const cancelRouter = Router();
 const DISPATCH_API_URL = (
   process.env["DISPATCH_API_URL"] ||
   process.env["DISPATCH_SERVER_URL"] ||
-  "https://taxitime.co.nz"
+  "https://invt-production.up.railway.app"
 ).replace(/\/+$/, "");
 
 /**

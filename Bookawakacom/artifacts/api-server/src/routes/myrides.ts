@@ -325,6 +325,61 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
     // Cancel any pending auto-dispatch timer for this booking (safe no-op if none exists)
     cancelScheduledDispatch(companyId, jobId);
 
+    // Critical: Firebase Cancelled alone does not close Dispatch jobStore — zombies
+    // stay Pending/Offered and get re-offered (#8692608312 half-cancel). Always
+    // forward to Dispatch unified /api/cancel so allbookings/pendingjobs/jobStore
+    // close together (Website, Passenger App wallet path, any source).
+    let dispatchCancel: { ok?: boolean; error?: string; status?: number } | null = null;
+    try {
+      const dispatchBase = (
+        process.env["DISPATCH_API_URL"] ||
+        process.env["DISPATCH_SERVER_URL"] ||
+        "https://invt-production.up.railway.app"
+      ).replace(/\/+$/, "");
+      const adminKey = process.env["BW_ADMIN_KEY"];
+      if (!adminKey) {
+        req.log.error({ jobId, companyId }, "BW_ADMIN_KEY missing — cannot forward cancel to Dispatch");
+        dispatchCancel = { ok: false, error: "BW_ADMIN_KEY not configured" };
+      } else {
+        const upstream = await fetch(`${dispatchBase}/api/cancel`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Admin-Key": adminKey,
+          },
+          body: JSON.stringify({
+            bookingId: Number(jobId) || jobId,
+            companyId,
+            cancelledBy: "website",
+            reason: "Cancelled via My Rides (passenger)",
+          }),
+        });
+        const text = await upstream.text();
+        let data: Record<string, unknown> = {};
+        try {
+          data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+        } catch {
+          data = { ok: false, error: text || upstream.statusText };
+        }
+        dispatchCancel = {
+          ok: upstream.ok && data.ok !== false,
+          error: typeof data.error === "string" ? data.error : undefined,
+          status: upstream.status,
+        };
+        if (!dispatchCancel.ok) {
+          req.log.warn(
+            { jobId, companyId, status: upstream.status, body: data },
+            "Dispatch /api/cancel forward failed after Passengerjobs cancel",
+          );
+        } else {
+          req.log.info({ jobId, companyId }, "Cancel forwarded to Dispatch /api/cancel");
+        }
+      }
+    } catch (fwdErr: any) {
+      dispatchCancel = { ok: false, error: fwdErr?.message || String(fwdErr) };
+      req.log.warn({ err: fwdErr, jobId, companyId }, "Dispatch cancel forward threw");
+    }
+
     // Email company + passenger on cancellation (fire-and-forget).
     const cancelledBooking = { ...(booking || {}), ...cancelFields, BookingId: booking?.BookingId ?? jobId };
     sendBookingCancelledEmails({
@@ -336,8 +391,17 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
       log: req.log,
     }).catch((e) => req.log.warn({ e, jobId }, "Cancel emails failed"));
 
-    req.log.info({ jobId, companyId, key, walletCredited, driverAssigned }, "Job cancelled — dispatcher alerted via pendingjobs Status update");
-    res.json({ ok: true, walletCredited, walletCreditAmount, driverAssigned });
+    req.log.info(
+      { jobId, companyId, key, walletCredited, driverAssigned, dispatchCancel },
+      "Job cancelled — Passengerjobs + Dispatch cancel attempted",
+    );
+    res.json({
+      ok: true,
+      walletCredited,
+      walletCreditAmount,
+      driverAssigned,
+      dispatchCancel,
+    });
   } catch (err: any) {
     req.log.error({ err }, "POST /my-rides/:jobId/cancel error");
     res.status(500).json({ error: err.message });
