@@ -28,7 +28,10 @@ export function isCompanyDispatchOnline(
   const entries = Object.values(sessions).filter((s) => s && typeof s === "object");
   if (entries.length === 0) return false;
   for (const s of entries) {
-    if (s.active === false || s.active === "false" || s.active === 0) continue;
+    // Firebase may store bool / "false" / 0 / "0" — compare via unknown so
+    // tsc does not reject number checks against a narrowed union.
+    const active = s.active as unknown;
+    if (active === false || active === "false" || active === 0 || active === "0") continue;
     const ts = Number(s.heartbeat ?? s.lastSeen ?? 0);
     if (!Number.isFinite(ts) || ts <= 0) return true;
     const ms = ts < 1e12 ? ts * 1000 : ts;

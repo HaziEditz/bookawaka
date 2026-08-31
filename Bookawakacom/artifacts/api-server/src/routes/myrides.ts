@@ -111,12 +111,12 @@ myRidesRouter.get("/my-rides", async (req, res) => {
       return;
     }
 
-    const snap = await withTimeout(
+    const snap = (await withTimeout(
       db.ref(`Passengerjobs/${resolvedKey}`).once("value"),
       10_000,
       `Passengerjobs/${resolvedKey}`,
-    );
-    const data = snap.val() ?? {};
+    )) as { val: () => unknown };
+    const data = (snap.val() ?? {}) as Record<string, unknown>;
     const rides = Object.values(data) as any[];
 
     // Authoritative-status overlay. Passengerjobs is the per-passenger index, but
@@ -134,12 +134,12 @@ myRidesRouter.get("/my-rides", async (req, res) => {
       const bid = r?.BookingId;
       if (!cid || !bid) return r;
       try {
-        const liveSnap = await withTimeout(
+        const liveSnap = (await withTimeout(
           db.ref(`allbookings/${cid}/${bid}`).once("value"),
           OVERLAY_TIMEOUT_MS,
           `allbookings/${cid}/${bid}`,
-        );
-        const live = liveSnap.val();
+        )) as { val: () => unknown };
+        const live = liveSnap.val() as Record<string, any> | null;
         if (!live || typeof live !== "object") return r;
         const paxSt = String(r.Status ?? r.status ?? "").toLowerCase();
         const liveSt = String(live.Status ?? live.status ?? "").toLowerCase();
