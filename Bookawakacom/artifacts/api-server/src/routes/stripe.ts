@@ -477,8 +477,9 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const Stripe = (await import("stripe")).default;
     const stripe = new Stripe(payCtx.secretKey, { apiVersion: "2026-04-22.dahlia" });
 
-    // Verify the session with Stripe directly
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    // sessionId guaranteed non-empty after walletOnly / required checks above
+    const stripeSessionId = String(sessionId);
+    const session = await stripe.checkout.sessions.retrieve(stripeSessionId);
 
     if (session.payment_status !== "paid") {
       res.status(402).json({ error: "Payment not completed", payment_status: session.payment_status });
@@ -488,7 +489,7 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     // Verify metadata matches — guard against session ID spoofing
     const meta = session.metadata ?? {};
     if (meta.bookingId !== bookingId || meta.companyId !== companyId || meta.type !== "booking_payment") {
-      req.log.warn({ sessionId, bookingId, companyId }, "verify-and-dispatch: metadata mismatch");
+      req.log.warn({ sessionId: stripeSessionId, bookingId, companyId }, "verify-and-dispatch: metadata mismatch");
       res.status(403).json({ error: "Session metadata does not match booking" });
       return;
     }
