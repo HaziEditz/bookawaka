@@ -356,15 +356,114 @@ stripeRouter.post("/stripe/create-booking-payment", async (req, res) => {
 // Verifies the Stripe session directly (no webhook needed) and triggers dispatch
 // if the booking hasn't been dispatched yet. Safe to call multiple times.
 stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
-  const { sessionId, bookingId, companyId } = req.body as {
+  const { sessionId, bookingId, companyId, walletOnly, walletAmountApplied } = req.body as {
     sessionId?: string;
     bookingId?: string;
     companyId?: string;
+    walletOnly?: boolean;
+    walletAmountApplied?: number;
   };
 
-  if (!sessionId || !bookingId || !companyId) {
-    res.status(400).json({ error: "sessionId, bookingId, companyId are required" });
+  if (!bookingId || !companyId) {
+    res.status(400).json({ error: "bookingId and companyId are required" });
     return;
+  }
+  if (!walletOnly && !sessionId) {
+    res.status(400).json({ error: "sessionId, bookingId, companyId are required (or walletOnly: true)" });
+    return;
+  }
+
+  // Wallet-only (full fare covered): no Stripe session — mark paid + dispatch paths.
+  if (walletOnly) {
+    try {
+      const db = getDatabase();
+      const bookingSnap = await db.ref(`allbookings/${companyId}/${bookingId}`).once("value");
+      const existing = bookingSnap.val() as Record<string, any> | null;
+      if (!existing) {
+        res.status(404).json({ error: "Booking not found" });
+        return;
+      }
+      const existingSt = String(existing.Status ?? existing.status ?? "").toLowerCase();
+      if (["cancelled", "canceled", "completed", "closed"].includes(existingSt)) {
+        res.json({ ok: true, alreadyDispatched: true, terminal: existingSt });
+        return;
+      }
+      if (String(existing.paymentStatus ?? "").toLowerCase() === "paid") {
+        res.json({ ok: true, alreadyDispatched: true });
+        return;
+      }
+
+      const scheduledMs = Number(existing.ScheduledForMs ?? existing.ScheduledFor ?? 0);
+      const isScheduled = Number.isFinite(scheduledMs) && scheduledMs > Date.now() + 60_000;
+      const postPayStatus = isScheduled ? "Scheduled" : "Pending";
+      const paidAt = new Date().toISOString();
+      const paidFields: Record<string, unknown> = {
+        Status: postPayStatus,
+        BookingStatus: postPayStatus,
+        paymentMethod: "wallet",
+        PaymentMethod: "wallet",
+        paymentStatus: "paid",
+        PaymentStatus: "paid",
+        paidAt,
+        ...(walletAmountApplied != null ? { walletAmountApplied } : {}),
+      };
+      const paidBooking = { ...existing, ...paidFields };
+
+      const paxKeys = new Set<string>();
+      for (const k of [
+        existing.passengerUid,
+        existing.PassengerUid,
+        existing.passengerId,
+        existing.PassengerId,
+        existing.passengerKey,
+        existing.PassengerKey,
+      ]) {
+        if (k && String(k).trim()) paxKeys.add(String(k).trim());
+      }
+      const phone = String(existing.PassengerPhone ?? existing.passengerPhone ?? "").replace(/[^0-9]/g, "");
+      if (phone.length >= 8) {
+        const idx = (await db.ref(`passengerIndex/phone/${phone}`).once("value")).val();
+        if (idx?.key) paxKeys.add(String(idx.key));
+        if (idx?.uid) paxKeys.add(String(idx.uid));
+      }
+
+      const writes: Promise<any>[] = [
+        db.ref(`allbookings/${companyId}/${bookingId}`).update(paidFields),
+        db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking),
+      ];
+      for (const pk of paxKeys) {
+        writes.push(db.ref(`Passengerjobs/${pk}/${bookingId}`).update(paidFields));
+      }
+      await Promise.all(writes);
+
+      if (isScheduled) {
+        const leadMins =
+          Number(
+            existing.NotifyDispatchBeforeMinutes ?? existing.DispatchTimebefore ?? existing.NotifyDispatchBefore ?? 30,
+          ) || 30;
+        registerScheduledDispatch({
+          companyId,
+          bookingId,
+          notifyAt: new Date(scheduledMs - leadMins * 60 * 1000).toISOString(),
+        });
+      }
+
+      sendCardPaidBookingEmails({
+        db,
+        booking: paidBooking,
+        companyId,
+        bookingId,
+        isScheduled,
+        log: req.log,
+      }).catch((e) => req.log.error({ e, bookingId }, "wallet-only paid email send failed"));
+
+      res.json({ ok: true, alreadyDispatched: false, status: postPayStatus, walletOnly: true });
+      return;
+    } catch (err: any) {
+      req.log.error({ err }, "POST /stripe/verify-and-dispatch walletOnly error");
+      res.status(500).json({ error: err.message ?? "Verification failed" });
+      return;
+    }
   }
 
   const payCtx = await resolveStripePaymentContext(companyId);
@@ -497,28 +596,42 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
       paidAt,
     };
 
-    // Look up passenger key so we can update Passengerjobs (the source My Rides reads from)
-    let passengerKey: string | null = null;
+    // Resolve every Passengerjobs key the passenger app / website might use.
+    // Passenger app Scheduled tab reads Passengerjobs/{firebaseUid}; website uses wallet key.
+    const paxKeys = new Set<string>();
+    const uidHint = String(
+      existing.passengerUid ??
+        existing.PassengerUid ??
+        existing.passengerId ??
+        existing.PassengerId ??
+        "",
+    ).trim();
+    if (uidHint && uidHint !== "guest" && !uidHint.startsWith("web_")) {
+      // Firebase UIDs are typically 28 chars; still accept any non-web key stamped at create.
+      paxKeys.add(uidHint);
+    }
+    const walletHint = String(existing.passengerKey ?? existing.PassengerKey ?? "").trim();
+    if (walletHint) paxKeys.add(walletHint);
+
     const rawPhone: string | null = existing.PassengerPhone ?? existing.passengerPhone ?? null;
     if (rawPhone) {
       const normalizedPhone = rawPhone.replace(/[^0-9]/g, "");
       const pkSnap = await db.ref(`passengerIndex/phone/${normalizedPhone}`).once("value");
-      passengerKey = pkSnap.val()?.key ?? null;
+      const idx = pkSnap.val();
+      if (idx?.key) paxKeys.add(String(idx.key));
+      if (idx?.uid) paxKeys.add(String(idx.uid));
     }
 
     const writes: Promise<any>[] = [
       db.ref(`allbookings/${companyId}/${bookingId}`).update(paidFields),
     ];
-    if (!isScheduled) {
-      writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking));
-    } else {
-      // Ensure a stale pendingjobs row from an earlier bug is cleared for scheduled.
-      writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).remove());
-    }
+    // Always write pendingjobs after paid — including Scheduled — so dispatch HQ can see
+    // the prebook (Status stays Scheduled; NotifyDispatchAt still promotes later).
+    // Do NOT remove scheduled rows (that left dispatch with no trace).
+    writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking));
 
-    // Keep Passengerjobs in sync so My Rides shows the correct status
-    if (passengerKey) {
-      writes.push(db.ref(`Passengerjobs/${passengerKey}/${bookingId}`).update(paidFields));
+    for (const pk of paxKeys) {
+      writes.push(db.ref(`Passengerjobs/${pk}/${bookingId}`).update(paidFields));
     }
 
     await Promise.all(writes);
@@ -549,7 +662,9 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
       });
       req.log.info(
         { bookingId, companyId, sessionId, postPayStatus },
-        "verify-and-dispatch: card paid — kept Scheduled (not pendingjobs)",
+        isScheduled
+          ? "verify-and-dispatch: card paid — Scheduled written to pendingjobs"
+          : "verify-and-dispatch: dispatched to pendingjobs",
       );
     } else {
       req.log.info({ bookingId, companyId, sessionId }, "verify-and-dispatch: dispatched to pendingjobs");
@@ -652,11 +767,48 @@ stripeRouter.post("/stripe/webhook", async (req, res) => {
                 stripeSessionId: session.id,
                 paidAt,
               }),
+              // Always land in pendingjobs after pay (Scheduled prebooks included).
+              db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking),
             ];
-            if (!isScheduled) {
-              writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).set(paidBooking));
-            } else {
-              writes.push(db.ref(`pendingjobs/${companyId}/${bookingId}`).remove());
+            // Sync Passengerjobs under uid + wallet/phone keys
+            const paxKeys = new Set<string>();
+            for (const k of [
+              existingBooking.passengerUid,
+              existingBooking.PassengerUid,
+              existingBooking.passengerId,
+              existingBooking.PassengerId,
+              existingBooking.passengerKey,
+              existingBooking.PassengerKey,
+            ]) {
+              if (k && String(k).trim()) paxKeys.add(String(k).trim());
+            }
+            const phone = String(
+              existingBooking.PassengerPhone ?? existingBooking.passengerPhone ?? "",
+            ).replace(/[^0-9]/g, "");
+            if (phone.length >= 8) {
+              try {
+                const idx = (await db.ref(`passengerIndex/phone/${phone}`).once("value")).val();
+                if (idx?.key) paxKeys.add(String(idx.key));
+                if (idx?.uid) paxKeys.add(String(idx.uid));
+              } catch {
+                /* ignore */
+              }
+            }
+            for (const pk of paxKeys) {
+              writes.push(
+                db.ref(`Passengerjobs/${pk}/${bookingId}`).update({
+                  ...walletFields,
+                  ...commissionFields,
+                  Status: postPayStatus,
+                  BookingStatus: postPayStatus,
+                  paymentMethod: "card",
+                  paymentStatus: "paid",
+                  stripeSessionId: session.id,
+                  paidAt,
+                }),
+              );
+            }
+            if (isScheduled) {
               const leadMins =
                 Number(
                   existingBooking.NotifyDispatchBeforeMinutes ??
@@ -685,7 +837,7 @@ stripeRouter.post("/stripe/webhook", async (req, res) => {
             req.log.info(
               { bookingId, companyId, sessionId: session.id, postPayStatus },
               isScheduled
-                ? "Booking paid — kept Scheduled"
+                ? "Booking paid — Scheduled kept in pendingjobs for dispatch"
                 : "Booking paid — dispatched to pendingjobs",
             );
           }
