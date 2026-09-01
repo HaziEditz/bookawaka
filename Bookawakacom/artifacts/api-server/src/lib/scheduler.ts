@@ -10,7 +10,7 @@
  *   1. Re-read the booking from `allbookings` to confirm it is still "Scheduled"
  *      (passenger may have cancelled it in the meantime).
  *   2. Write the full booking to `pendingjobs` so the dispatcher sees it.
- *   3. Update `allbookings` Status → "Pending".
+ *   3. Update `allbookings` Status + BookingStatus → "Pending".
  *   4. Delete the `scheduledDispatch` index record.
  *
  * Node.js `setTimeout` is capped at ~24.8 days (max 32-bit signed ms). For
@@ -50,7 +50,11 @@ async function dispatchNow(companyId: string, bookingId: string) {
     }
 
     const booking = snap.val() as Record<string, unknown>;
-    const currentStatus = (booking.Status ?? booking.status) as string | undefined;
+    // Prefer BookingStatus when present — Status alone was historically left Pending
+    // while BookingStatus stayed Scheduled (live #8692608313 split-brain).
+    const currentStatus = String(
+      booking.BookingStatus ?? booking.Status ?? booking.status ?? "",
+    ).trim();
 
     if (currentStatus !== "Scheduled") {
       logger.info(
@@ -61,9 +65,16 @@ async function dispatchNow(companyId: string, bookingId: string) {
       return;
     }
 
+    // Always set BookingStatus + Status together — Offer-tab reads Status while
+    // accept/auto-dispatch require BookingStatus === Pending.
+    const pendingFields = {
+      Status: "Pending",
+      status: "Pending",
+      BookingStatus: "Pending",
+    };
     await Promise.all([
-      db.ref(`/pendingjobs/${companyId}/${bookingId}`).set({ ...booking, Status: "Pending", status: "Pending" }),
-      db.ref(`/allbookings/${companyId}/${bookingId}`).update({ Status: "Pending", status: "Pending" }),
+      db.ref(`/pendingjobs/${companyId}/${bookingId}`).set({ ...booking, ...pendingFields }),
+      db.ref(`/allbookings/${companyId}/${bookingId}`).update(pendingFields),
       db.ref(`/scheduledDispatch/${companyId}/${bookingId}`).remove(),
     ]);
 
