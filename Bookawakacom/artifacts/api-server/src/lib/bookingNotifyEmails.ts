@@ -23,7 +23,9 @@ function bookingDetailsHtml(booking: Record<string, any>, scheduledLabel: string
 
 function paymentBits(booking: Record<string, any>): { pmLabel: string; fareDisplay: string; paymentNote: string } {
   const paymentMethodLabel: Record<string, string> = {
+    cash: "Cash",
     card: "Card (Stripe)",
+    business_account: "Business Account",
     account: "Account",
     acc: "ACC",
     tm: "Total Mobility",

@@ -4,9 +4,37 @@
  */
 import { Router, type Request, type Response } from "express";
 import { getAuth, getDatabase } from "../lib/firebase";
-import { sendBookingCreatedEmails } from "../lib/bookingNotifyEmails";
+import {
+  sendBookingCreatedEmails,
+  sendBookingUpdatedEmails,
+  sendBookingCancelledEmails,
+} from "../lib/bookingNotifyEmails";
 
 const bookingRouter = Router();
+
+function paymentStatusOf(row: Record<string, unknown> | null | undefined): string {
+  return String(row?.paymentStatus ?? row?.PaymentStatus ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function bookingEmailPayload(row: Record<string, unknown>, jobId: string) {
+  return {
+    ...row,
+    BookingId: jobId,
+    PickAddress: row.PickupAddress ?? row.pickupAddress ?? row.PickAddress,
+    DropAddress: row.DropoffAddress ?? row.dropoffAddress ?? row.DropAddress,
+    PassengerName: row.PassengerName ?? row.passengerName,
+    PassengerPhone: row.PassengerPhone ?? row.passengerPhone ?? row.PhoneNo,
+    PassengerEmail: row.PassengerEmail ?? row.passengerEmail ?? row.Email,
+    Fare: row.EstimatedFare ?? row.estimatedFare ?? row.Fare ?? row.CustomeRate,
+    paymentMethod: row.paymentMethod ?? row.PaymentMethod,
+    ScheduledFor: row.ScheduledFor ?? row.scheduledFor,
+    ScheduledForMs: row.ScheduledFor ?? row.scheduledFor ?? row.ScheduledForMs,
+    Info: row.Info ?? row.Notes ?? row.notes ?? "",
+    Stops: row.Stops ?? row.stops ?? [],
+  };
+}
 
 async function requireUid(req: Request): Promise<string> {
   const authHeader = req.headers.authorization;
@@ -164,11 +192,12 @@ bookingRouter.post("/booking/cancel", async (req: Request, res: Response) => {
     return;
   }
 
-  const { companyId, jobId, cancelFields, passengerUid } = req.body as {
+  const { companyId, jobId, cancelFields, passengerUid, mode } = req.body as {
     companyId?: string;
     jobId?: string;
     cancelFields?: Record<string, unknown>;
     passengerUid?: string;
+    mode?: "abort" | "intentional";
   };
 
   if (!companyId || !jobId || !cancelFields) {
@@ -177,18 +206,74 @@ bookingRouter.post("/booking/cancel", async (req: Request, res: Response) => {
   }
 
   const paxKey = String(passengerUid || uid).trim() || uid;
-  const patch = {
+  const abortMode = mode === "abort";
+  const patch: Record<string, unknown> = {
     ...cancelFields,
     UpdatedAt: new Date().toISOString(),
   };
 
   try {
     const db = getDatabase();
+    const abSnap = await db.ref(`allbookings/${companyId}/${jobId}`).once("value");
+    const existing = (abSnap.val() || {}) as Record<string, unknown>;
+    const pay = paymentStatusOf(existing);
+
+    // Abort cleanup must never wipe a booking that already paid successfully.
+    if (abortMode && (pay === "paid" || pay === "confirmed")) {
+      req.log.info({ companyId, jobId, pay }, "booking/cancel abort refused — already paid");
+      res.json({ success: true, skipped: true, reason: "already_paid" });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const prevHistory = Array.isArray(existing.editHistory)
+      ? existing.editHistory
+      : Array.isArray(existing.EditHistory)
+        ? existing.EditHistory
+        : [];
+    const historyEntry = !abortMode
+      ? {
+          at: nowIso,
+          by: "passenger",
+          actorName: "passenger_app",
+          summary: "Passenger cancelled booking",
+          changes: ["Passenger cancelled booking"],
+          fields: ["Status", "CancelledBy", "CancelledAt", "CancelReason"],
+        }
+      : null;
+    const patchWithHistory: Record<string, unknown> = {
+      ...patch,
+      UpdatedAt: nowIso,
+      updatedAt: nowIso,
+      ...(historyEntry
+        ? {
+            editHistory: [...prevHistory, historyEntry],
+            EditHistory: [...prevHistory, historyEntry],
+          }
+        : {}),
+    };
+
     await Promise.all([
-      db.ref(`pendingjobs/${companyId}/${jobId}`).update(patch),
-      db.ref(`allbookings/${companyId}/${jobId}`).update(patch),
-      db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(patch),
+      db.ref(`pendingjobs/${companyId}/${jobId}`).update(patchWithHistory),
+      db.ref(`allbookings/${companyId}/${jobId}`).update(patchWithHistory),
+      db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(patchWithHistory),
     ]);
+
+    // Company (+ passenger) cancel email for scheduled/later jobs on intentional cancel.
+    const merged: Record<string, unknown> = { ...existing, ...patchWithHistory };
+    if (!abortMode && isScheduledBooking(merged)) {
+      const passengerEmail =
+        String(merged.PassengerEmail ?? merged.passengerEmail ?? merged.Email ?? "").trim() || undefined;
+      sendBookingCancelledEmails({
+        booking: bookingEmailPayload(merged, jobId),
+        companyId,
+        companyName: String(merged.CompanyName ?? merged.companyName ?? "").trim() || undefined,
+        companyEmail: String(merged.CompanyEmail ?? merged.companyEmail ?? "").trim() || undefined,
+        passengerEmail,
+        log: req.log,
+      }).catch((e) => req.log.warn({ err: e, jobId }, "booking cancel emails failed"));
+    }
+
     res.json({ success: true });
   } catch (err: any) {
     req.log.error({ err }, "POST /booking/cancel failed");
@@ -206,11 +291,13 @@ bookingRouter.post("/booking/edit", async (req: Request, res: Response) => {
     return;
   }
 
-  const { companyId, jobId, editFields, passengerUid } = req.body as {
+  const { companyId, jobId, editFields, passengerUid, changeSummary, notifyCompany } = req.body as {
     companyId?: string;
     jobId?: string;
     editFields?: Record<string, unknown>;
     passengerUid?: string;
+    changeSummary?: string[];
+    notifyCompany?: boolean;
   };
 
   if (!companyId || !jobId || !editFields) {
@@ -219,15 +306,71 @@ bookingRouter.post("/booking/edit", async (req: Request, res: Response) => {
   }
 
   const paxKey = String(passengerUid || uid).trim() || uid;
-  const patch = { ...editFields, UpdatedAt: new Date().toISOString() };
+  const nowIso = new Date().toISOString();
+  const summary = Array.isArray(changeSummary) ? changeSummary.filter(Boolean).map(String) : [];
 
   try {
     const db = getDatabase();
-    await Promise.all([
-      db.ref(`pendingjobs/${companyId}/${jobId}`).update(patch),
+    const abSnap = await db.ref(`allbookings/${companyId}/${jobId}`).once("value");
+    const existing = (abSnap.val() || {}) as Record<string, unknown>;
+    const prevHistory = Array.isArray(existing.editHistory)
+      ? existing.editHistory
+      : Array.isArray(existing.EditHistory)
+        ? existing.EditHistory
+        : [];
+
+    const historyEntry = {
+      at: nowIso,
+      by: "passenger",
+      actorName: "passenger_app",
+      summary: summary.length ? summary.join("; ") : "Passenger updated booking",
+      changes: summary,
+      fields: Object.keys(editFields),
+    };
+
+    const patch: Record<string, unknown> = {
+      ...editFields,
+      UpdatedAt: nowIso,
+      updatedAt: nowIso,
+      editHistory: [...prevHistory, historyEntry],
+      EditHistory: [...prevHistory, historyEntry],
+    };
+
+    const writes: Promise<unknown>[] = [
       db.ref(`allbookings/${companyId}/${jobId}`).update(patch),
       db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(patch),
-    ]);
+    ];
+
+    // Only touch pendingjobs when a real dispatch row already exists (avoid sparse remnants).
+    const pjSnap = await db.ref(`pendingjobs/${companyId}/${jobId}`).once("value");
+    if (pjSnap.exists() && pjSnap.val() && typeof pjSnap.val() === "object") {
+      const pj = pjSnap.val() as Record<string, unknown>;
+      const keys = Object.keys(pj);
+      if (keys.length > 3) {
+        writes.push(db.ref(`pendingjobs/${companyId}/${jobId}`).update(patch));
+      }
+    }
+
+    await Promise.all(writes);
+
+    const merged = { ...existing, ...patch };
+    const scheduled = isScheduledBooking(merged);
+    const shouldEmail = notifyCompany !== false && (scheduled || summary.length > 0);
+    if (shouldEmail) {
+      const passengerEmail =
+        String(merged.PassengerEmail ?? merged.passengerEmail ?? merged.Email ?? "").trim() || undefined;
+      sendBookingUpdatedEmails({
+        booking: bookingEmailPayload(merged, jobId),
+        companyId,
+        companyName: String(merged.CompanyName ?? merged.companyName ?? "").trim() || undefined,
+        companyEmail: String(merged.CompanyEmail ?? merged.companyEmail ?? "").trim() || undefined,
+        passengerEmail,
+        changeSummary: summary.length ? summary : ["Passenger updated booking details"],
+        scheduleChanged: summary.some((s) => /time|schedule|date/i.test(s)),
+        log: req.log,
+      }).catch((e) => req.log.warn({ err: e, jobId }, "booking edit emails failed"));
+    }
+
     res.json({ success: true });
   } catch (err: any) {
     req.log.error({ err }, "POST /booking/edit failed");
@@ -245,14 +388,18 @@ bookingRouter.post("/notify-booking", async (req: Request, res: Response) => {
   const bookingId = String(b.bookingId ?? b.BookingId ?? "").trim();
   const pickup = String(b.pickup ?? b.PickAddress ?? "").trim();
   const destination = String(b.destination ?? b.DropAddress ?? "").trim();
+  const companyId = String(b.companyId ?? "").trim() || undefined;
 
-  if (!companyEmail || !bookingId || !pickup || !destination) {
-    res.status(400).json({ error: "companyEmail, bookingId, pickup and destination are required" });
+  if ((!companyEmail && !companyId) || !bookingId || !pickup || !destination) {
+    res.status(400).json({
+      error: "companyEmail (or companyId), bookingId, pickup and destination are required",
+    });
     return;
   }
 
   const scheduledFor = b.scheduledFor ?? b.ScheduledFor ?? null;
   const scheduledMs = scheduledFor ? new Date(scheduledFor).getTime() : 0;
+  const payment = String(b.payment ?? "cash").toLowerCase();
 
   try {
     await sendBookingCreatedEmails({
@@ -266,17 +413,17 @@ bookingRouter.post("/notify-booking", async (req: Request, res: Response) => {
         Stops: Array.isArray(b.stops) ? b.stops : [],
         VehicleType: b.vehicleType ?? "Taxi",
         Fare: String(b.fare ?? "").replace(/[^0-9.]/g, "") || undefined,
-        paymentMethod: b.payment ?? "cash",
+        paymentMethod: payment,
         ScheduledFor: Number.isFinite(scheduledMs) && scheduledMs > 0 ? scheduledMs : 0,
         ScheduledForMs: Number.isFinite(scheduledMs) && scheduledMs > 0 ? scheduledMs : 0,
         Info: b.notes ?? "",
       },
-      companyId: b.companyId,
+      companyId,
       companyName: b.companyName,
-      companyEmail,
+      companyEmail: companyEmail || undefined,
       passengerEmail: b.passengerEmail,
       isScheduled: Number.isFinite(scheduledMs) && scheduledMs > Date.now(),
-      isCardPayment: String(b.payment ?? "").toLowerCase() === "card",
+      isCardPayment: payment === "card",
       log: req.log,
     });
     res.json({ ok: true });
