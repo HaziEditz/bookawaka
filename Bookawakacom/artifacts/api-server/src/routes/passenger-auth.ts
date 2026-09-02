@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { FIREBASE_CONFIG, getAuth, getDatabase } from "../lib/firebase";
 import { normalizeEmailKey, phoneIndexCandidates } from "../lib/passengerKey";
 
@@ -55,7 +55,7 @@ async function identityToolkit(
   return { ok: res.ok, status: res.status, json };
 }
 
-async function writePhoneIndex(digits: string, uid: string, email: string) {
+async function writePhoneIndex(digits: string, uid: string, email: string): Promise<void> {
   if (!digits) return;
   const db = getDatabase();
   const payload = { key: uid, email, uid, updatedAt: Date.now() };
@@ -66,7 +66,7 @@ async function writePhoneIndex(digits: string, uid: string, email: string) {
   );
 }
 
-passengerAuthRouter.post("/passenger-auth/register", async (req, res) => {
+passengerAuthRouter.post("/passenger-auth/register", async (req: Request, res: Response) => {
   try {
     const name = String(req.body?.name || "").trim();
     const emailRaw = String(req.body?.email || "").trim().toLowerCase();
@@ -126,14 +126,13 @@ passengerAuthRouter.post("/passenger-auth/register", async (req, res) => {
       createdAt: new Date().toISOString(),
     }).catch(() => undefined);
 
-    // Ensure displayName is set via Admin if Identity Toolkit omitted it
     try {
       await getAuth().updateUser(uid, { displayName: name });
     } catch {
       /* best-effort */
     }
 
-    res.json({
+    return res.json({
       ok: true,
       uid,
       email: authEmail,
@@ -144,11 +143,11 @@ passengerAuthRouter.post("/passenger-auth/register", async (req, res) => {
     });
   } catch (err: unknown) {
     const e = err as Error & { status?: number };
-    res.status(e.status || 500).json({ error: e.message || "Register failed" });
+    return res.status(e.status || 500).json({ error: e.message || "Register failed" });
   }
 });
 
-passengerAuthRouter.post("/passenger-auth/login", async (req, res) => {
+passengerAuthRouter.post("/passenger-auth/login", async (req: Request, res: Response) => {
   try {
     const identifier = String(req.body?.identifier || req.body?.email || "").trim();
     const password = String(req.body?.password || "");
@@ -168,7 +167,7 @@ passengerAuthRouter.post("/passenger-auth/login", async (req, res) => {
     const db = getDatabase();
     const profileSnap = await db.ref(`users/${uid}`).once("value");
     const profile = (profileSnap.val() || {}) as Record<string, unknown>;
-    res.json({
+    return res.json({
       ok: true,
       uid,
       email: String(profile.email || email),
@@ -179,11 +178,11 @@ passengerAuthRouter.post("/passenger-auth/login", async (req, res) => {
     });
   } catch (err: unknown) {
     const e = err as Error & { status?: number };
-    res.status(e.status || 500).json({ error: e.message || "Login failed" });
+    return res.status(e.status || 500).json({ error: e.message || "Login failed" });
   }
 });
 
-passengerAuthRouter.post("/passenger-auth/forgot", async (req, res) => {
+passengerAuthRouter.post("/passenger-auth/forgot", async (req: Request, res: Response) => {
   try {
     const identifier = String(req.body?.identifier || req.body?.email || "").trim();
     if (!identifier) {
@@ -202,14 +201,14 @@ passengerAuthRouter.post("/passenger-auth/forgot", async (req, res) => {
           : msg,
       });
     }
-    res.json({ ok: true, email });
+    return res.json({ ok: true, email });
   } catch (err: unknown) {
     const e = err as Error & { status?: number };
-    res.status(e.status || 500).json({ error: e.message || "Reset failed" });
+    return res.status(e.status || 500).json({ error: e.message || "Reset failed" });
   }
 });
 
-passengerAuthRouter.get("/passenger-auth/session", async (req, res) => {
+passengerAuthRouter.get("/passenger-auth/session", async (req: Request, res: Response) => {
   try {
     const authHeader = String(req.headers.authorization || "");
     const token = authHeader.startsWith("Bearer ")
@@ -220,7 +219,7 @@ passengerAuthRouter.get("/passenger-auth/session", async (req, res) => {
     const db = getDatabase();
     const snap = await db.ref(`users/${decoded.uid}`).once("value");
     const profile = (snap.val() || {}) as Record<string, unknown>;
-    res.json({
+    return res.json({
       ok: true,
       uid: decoded.uid,
       email: String(profile.email || decoded.email || ""),
@@ -228,7 +227,7 @@ passengerAuthRouter.get("/passenger-auth/session", async (req, res) => {
       phone: String(profile.phone || ""),
     });
   } catch {
-    res.status(401).json({ error: "Session expired — please sign in again." });
+    return res.status(401).json({ error: "Session expired — please sign in again." });
   }
 });
 
