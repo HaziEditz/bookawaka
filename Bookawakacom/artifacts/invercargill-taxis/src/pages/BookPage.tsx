@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import AddressInput from "@/components/AddressInput";
 import BookingMapPanel from "@/components/BookingMapPanel";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
-import { getOrCreatePassengerKey } from "@/lib/passengerKey";
+import { getPassengerSession } from "@/lib/passengerKey";
 import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
   Car,
@@ -314,7 +314,21 @@ export default function BookPage() {
   });
 
   useEffect(() => {
-    setPassengerKey(getOrCreatePassengerKey());
+    const session = getPassengerSession();
+    if (!session?.uid) {
+      const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+      window.location.href = `${base}/sign-in?next=/book`;
+      return;
+    }
+    setPassengerKey(session.uid);
+    if (session.name) {
+      setForm((prev) => ({
+        ...prev,
+        passengerName: prev.passengerName || session.name,
+        passengerPhone: prev.passengerPhone || session.phone || "",
+        passengerEmail: prev.passengerEmail || (session.email.includes("@phone.bookawaka.users") ? "" : session.email),
+      }));
+    }
   }, []);
 
   const fetchWallet = async (key: string) => {

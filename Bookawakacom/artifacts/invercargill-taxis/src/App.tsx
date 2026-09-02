@@ -33,11 +33,15 @@ import { useToast } from "@/hooks/use-toast";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { getPassengerSession } from "@/lib/passengerKey";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import NotFound from "@/pages/not-found";
 import BookPage from "@/pages/BookPage";
 import RegisterPage from "@/pages/RegisterPage";
 import MyRidesPage from "@/pages/MyRidesPage";
+import SignInPage from "@/pages/SignInPage";
+import CreateAccountPage from "@/pages/CreateAccountPage";
+import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import RentPage from "@/pages/RentPage";
 import TaxiPage from "@/pages/TaxiPage";
 import FoodPage from "@/pages/FoodPage";
@@ -215,6 +219,11 @@ function Home() {
 
   const handleBookNow = () => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+    const session = getPassengerSession();
+    if (!session?.uid) {
+      window.location.href = `${base}/sign-in?next=/book`;
+      return;
+    }
     window.location.href = `${base}/book`;
   };
 
@@ -265,6 +274,7 @@ function Home() {
             <a href="#operators" className={`text-sm font-bold transition-colors ${isScrolled ? "text-accent hover:text-primary" : "text-accent hover:text-white"}`} data-testid="nav-link-operators">For Operators</a>
             <a href="#contact" className={`text-sm font-bold transition-colors ${isScrolled ? "text-foreground/80 hover:text-primary" : "text-white/90 hover:text-accent"}`} data-testid="nav-link-contact">Contact</a>
             <a href={`${import.meta.env.BASE_URL}my-rides`} className={`text-sm font-bold transition-colors ${isScrolled ? "text-foreground/80 hover:text-primary" : "text-white/90 hover:text-accent"}`} data-testid="nav-link-my-rides">My Rides</a>
+            <a href={`${import.meta.env.BASE_URL}sign-in`} className={`text-sm font-bold transition-colors ${isScrolled ? "text-foreground/80 hover:text-primary" : "text-white/90 hover:text-accent"}`} data-testid="nav-link-sign-in">Sign In</a>
           </div>
 
           <div className="hidden lg:flex items-center gap-3">
@@ -1073,6 +1083,9 @@ function Router() {
     <Switch>
       <Route path="/book" component={BookPage} />
       <Route path="/my-rides" component={MyRidesPage} />
+      <Route path="/sign-in" component={SignInPage} />
+      <Route path="/create-account" component={CreateAccountPage} />
+      <Route path="/forgot-password" component={ForgotPasswordPage} />
       <Route path="/register" component={RegisterPage} />
       <Route path="/join" component={RegisterPage} />
       <Route path="/rent" component={RentPage} />

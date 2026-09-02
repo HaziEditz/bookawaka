@@ -18,6 +18,7 @@ import geocodeRouter from "./geocode";
 import adminWalletRouter from "./admin-wallet";
 import cancelRouter from "./cancel";
 import bookingRouter from "./booking";
+import passengerAuthRouter from "./passenger-auth";
 
 const router: IRouter = Router();
 
@@ -41,5 +42,6 @@ router.use(adminWalletRouter);
 router.use(cancelRouter);
 // Passenger-app create/cancel/edit + notify-booking (fixes live /api/booking/* 404).
 router.use(bookingRouter);
+router.use(passengerAuthRouter);
 
 export default router;

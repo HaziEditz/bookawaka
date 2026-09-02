@@ -131,7 +131,15 @@ function statusLabel(status: string | undefined): { text: string; key: string } 
 }
 
 function getStoredKey(): string | null {
-  return localStorage.getItem("bw_passenger_key");
+  try {
+    const session = JSON.parse(localStorage.getItem("bw_passenger_session") || "null");
+    if (session?.uid) return String(session.uid);
+  } catch {
+    /* fall through */
+  }
+  const key = localStorage.getItem("bw_passenger_key");
+  if (key && !key.startsWith("web_")) return key;
+  return null;
 }
 
 function saveKey(key: string) {
@@ -199,7 +207,10 @@ export default function MyRidesPage() {
     const stored = getStoredKey();
     if (stored) {
       fetchRides(stored);
+      return;
     }
+    const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+    window.location.href = `${base}/sign-in?next=/my-rides`;
   }, []);
 
   // Backend-driven refresh: poll while any ride is in a live state so the user
@@ -341,53 +352,16 @@ export default function MyRidesPage() {
             </div>
           )}
 
-          {/* Cross-device lookup */}
+          {/* Sign-in required — no guest phone/email lookup */}
           {!hasLocalKey && !loaded && (
             <div className="bg-card border border-border rounded-[1.5rem] p-6 shadow-xl mb-8">
-              <h2 className="font-bold text-base mb-1">Find your bookings</h2>
+              <h2 className="font-bold text-base mb-1">Sign in to see your rides</h2>
               <p className="text-sm text-muted-foreground mb-5">
-                Enter the phone number or email you used when booking — your rides will appear on any device.
+                Guest lookup is no longer available. Sign in with the email or phone and password for your account.
               </p>
-              <form onSubmit={handleLookup} className="space-y-4">
-                <div className="flex gap-2 mb-1">
-                  <button
-                    type="button"
-                    onClick={() => setLookupType("phone")}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-bold border transition-colors ${lookupType === "phone" ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary"}`}
-                  >
-                    <Phone className="w-3.5 h-3.5" /> Phone
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLookupType("email")}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-bold border transition-colors ${lookupType === "email" ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary"}`}
-                  >
-                    <Mail className="w-3.5 h-3.5" /> Email
-                  </button>
-                </div>
-                <div className="flex gap-3">
-                  <Input
-                    value={lookupValue}
-                    onChange={(e) => setLookupValue(e.target.value)}
-                    placeholder={lookupType === "phone" ? "e.g. 021 123 4567" : "you@example.com"}
-                    type={lookupType === "email" ? "email" : "tel"}
-                    required
-                    className="rounded-xl h-12 flex-1"
-                  />
-                  <Button
-                    type="submit"
-                    disabled={lookupLoading || !lookupValue.trim()}
-                    className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-xl h-12 px-5 font-bold"
-                  >
-                    {lookupLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                  </Button>
-                </div>
-                {lookupError && (
-                  <p className="text-sm text-destructive font-medium flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {lookupError}
-                  </p>
-                )}
-              </form>
+              <a href={`${import.meta.env.BASE_URL}sign-in?next=/my-rides`}>
+                <Button className="rounded-xl h-12 px-5 font-bold">Sign In</Button>
+              </a>
             </div>
           )}
 
@@ -399,14 +373,15 @@ export default function MyRidesPage() {
                 className="text-sm text-primary font-bold hover:underline"
                 onClick={() => {
                   localStorage.removeItem("bw_passenger_key");
+                  localStorage.removeItem("bw_passenger_session");
                   setLoaded(false);
                   setRides([]);
                   setPassengerKey(null);
-                  setLookupDone(false);
-                  setLookupValue("");
+                  const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+                  window.location.href = `${base}/sign-in?next=/my-rides`;
                 }}
               >
-                Look up a different account
+                Sign out
               </button>
             </div>
           )}
