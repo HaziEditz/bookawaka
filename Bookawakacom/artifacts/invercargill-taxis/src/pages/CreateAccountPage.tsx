@@ -18,8 +18,8 @@ export default function CreateAccountPage() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!name.trim() || !phone.trim() || password.length < 6) {
-      setError("Name, phone, and a password of at least 6 characters are required. Email is optional.");
+    if (!name.trim() || !email.trim() || !phone.trim() || password.length < 6) {
+      setError("Name, email, phone, and a password of at least 6 characters are required.");
       return;
     }
     setLoading(true);
@@ -73,7 +73,7 @@ export default function CreateAccountPage() {
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="email">Email (optional if using phone)</Label>
+            <Label htmlFor="email">Email</Label>
             <div className="relative">
               <Mail className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
               <Input id="email" type="email" className="pl-9 bg-slate-950 border-slate-700" value={email} onChange={(e) => setEmail(e.target.value)} />

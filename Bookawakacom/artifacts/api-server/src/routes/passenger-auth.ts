@@ -74,17 +74,14 @@ passengerAuthRouter.post("/passenger-auth/register", async (req, res) => {
     const password = String(req.body?.password || "");
     const phoneDigits = normalisePhone(phone);
 
-    if (!name || password.length < 6) {
-      return res.status(400).json({ error: "Name and a password of at least 6 characters are required." });
+    if (!name || !emailRaw || password.length < 6) {
+      return res.status(400).json({ error: "Name, email, and a password of at least 6 characters are required." });
     }
     if (!phoneDigits || phoneDigits.length < 7) {
       return res.status(400).json({ error: "A valid phone number is required." });
     }
-    if (!emailRaw && !phoneDigits) {
-      return res.status(400).json({ error: "Email or phone number is required." });
-    }
 
-    const authEmail = emailRaw || phoneAuthEmail(phoneDigits);
+    const authEmail = emailRaw;
     const created = await identityToolkit("accounts:signUp", {
       email: authEmail,
       password,
