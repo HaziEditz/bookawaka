@@ -234,31 +234,8 @@ export default function MyRidesPage() {
 
   const handleLookup = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLookupLoading(true);
-    setLookupError(null);
-    try {
-      const param = lookupType === "email"
-        ? `email=${encodeURIComponent(lookupValue.trim())}`
-        : `phone=${encodeURIComponent(lookupValue.trim())}`;
-      const res = await fetch(`${import.meta.env.BASE_URL}api/my-rides?${param}`);
-      const d = await res.json();
-      if (!res.ok) throw new Error(d.error ?? "Lookup failed.");
-
-      const foundKey: string | null = d.passengerKey ?? null;
-      setLookupDone(true);
-
-      if (foundKey) {
-        saveKey(foundKey);
-        fetchRides(foundKey);
-      } else {
-        setRides([]);
-        setLoaded(true);
-      }
-    } catch (err: any) {
-      setLookupError(err.message ?? "Something went wrong. Please try again.");
-    } finally {
-      setLookupLoading(false);
-    }
+    const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+    window.location.href = `${base}/sign-in?next=/my-rides`;
   };
 
   const handleCancelled = (bookingId: string) => {

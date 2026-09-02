@@ -9,6 +9,7 @@ import {
   sendBookingUpdatedEmails,
   sendBookingCancelledEmails,
 } from "../lib/bookingNotifyEmails";
+import { upsertPhoneIndex } from "../lib/passengerKey";
 
 const bookingRouter = Router();
 
@@ -126,11 +127,14 @@ bookingRouter.post("/booking/create", async (req: Request, res: Response) => {
     writes.push(db.ref(`allbookings/${companyId}/${jobId}`).set(enriched));
     writes.push(db.ref(`Passengerjobs/${paxKey}/${jobId}`).set(enriched));
 
-    // Also index phone → uid so verify path can find the passenger row.
+    // Merge phone → uid (+ email when known) so phone sign-in keeps working.
     const phone = String(enriched.PassengerPhone ?? enriched.passengerPhone ?? enriched.PhoneNo ?? enriched.phone ?? "")
       .replace(/[^0-9]/g, "");
-    if (phone.length >= 8) {
-      writes.push(db.ref(`passengerIndex/phone/${phone}`).update({ key: paxKey, uid: paxKey }));
+    const paxEmail = String(
+      enriched.PassengerEmail ?? enriched.passengerEmail ?? enriched.Email ?? "",
+    ).trim();
+    if (phone.length >= 7) {
+      writes.push(upsertPhoneIndex(db, phone, paxKey, paxEmail || undefined));
     }
 
     await Promise.all(writes);

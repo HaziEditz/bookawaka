@@ -94,33 +94,136 @@ async function scanWalletByPhone(
   return found;
 }
 
+export type PhoneIndexPayload = {
+  key: string;
+  uid: string;
+  email?: string;
+  updatedAt: number;
+};
+
+/**
+ * Resolve a real Auth email for a passenger uid — prefers opts.email, then
+ * users/{uid}.email, then an existing phone-index email. Never invents web_*.
+ */
+export async function resolvePassengerEmail(
+  db: FirebaseDatabase,
+  uid: string,
+  opts?: { email?: string; phone?: string },
+): Promise<string> {
+  const fromOpts = String(opts?.email || "").trim().toLowerCase();
+  if (fromOpts.includes("@") && !fromOpts.includes("phone.bookawaka.users")) {
+    return fromOpts;
+  }
+  if (fromOpts.includes("@")) return fromOpts;
+
+  try {
+    const userSnap = await db.ref(`users/${uid}`).once("value");
+    const userEmail = String(userSnap.val()?.email || "").trim().toLowerCase();
+    if (userEmail.includes("@")) return userEmail;
+  } catch {
+    /* continue */
+  }
+
+  if (opts?.phone) {
+    for (const c of phoneIndexCandidates(opts.phone)) {
+      try {
+        const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
+        const email = String(snap.val()?.email || "").trim().toLowerCase();
+        if (email.includes("@")) return email;
+      } catch {
+        /* continue */
+      }
+    }
+  }
+
+  return fromOpts;
+}
+
+/**
+ * Upsert phone index for all NZ digit variants. Always merges via update() so
+ * we never wipe an existing email with a key-only write.
+ */
+export async function upsertPhoneIndex(
+  db: FirebaseDatabase,
+  phone: string,
+  uid: string,
+  email?: string,
+): Promise<void> {
+  const digits = normalizePhoneKey(phone);
+  if (!digits || digits.length < 7 || !uid) return;
+
+  const resolvedEmail = await resolvePassengerEmail(db, uid, { email, phone: digits });
+  const phonePayload: Record<string, string | number> = {
+    key: uid,
+    uid,
+    updatedAt: Date.now(),
+  };
+  if (resolvedEmail.includes("@")) {
+    phonePayload.email = resolvedEmail;
+  }
+
+  const updates: Record<string, Record<string, string | number>> = {};
+  for (const candidate of phoneIndexCandidates(digits)) {
+    updates[`passengerIndex/phone/${candidate}`] = phonePayload;
+  }
+
+  if (resolvedEmail.includes("@")) {
+    const emailKey = emailIndexKey(resolvedEmail);
+    if (emailKey) {
+      updates[`passengerIndex/email/${emailKey}`] = {
+        key: uid,
+        uid,
+        email: resolvedEmail,
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  updates[`passengerIndex/key/${uid}`] = {
+    key: uid,
+    uid,
+    updatedAt: Date.now(),
+    ...(resolvedEmail.includes("@") ? { email: resolvedEmail } : {}),
+  };
+
+  await db.ref().update(updates);
+}
+
 /**
  * Write passengerIndex/email and passengerIndex/phone rows so future lookups
- * resolve by email (preferred) or phone.
+ * resolve by email (preferred) or phone. Never writes key-only phone rows.
  */
 export async function ensurePassengerIndexForWallet(
   db: FirebaseDatabase,
   passengerKey: string,
   opts: { phone?: string; email?: string },
 ): Promise<void> {
-  const updates: Record<string, { key: string; updatedAt?: string }> = {};
-  const nowIso = new Date().toISOString();
+  if (!passengerKey || passengerKey.startsWith("web_")) return;
+
+  if (opts.phone) {
+    await upsertPhoneIndex(db, opts.phone, passengerKey, opts.email);
+    return;
+  }
 
   if (opts.email) {
     const emailKey = emailIndexKey(opts.email);
-    if (emailKey) {
-      updates[`passengerIndex/email/${emailKey}`] = { key: passengerKey, updatedAt: nowIso };
-    }
+    if (!emailKey) return;
+    const resolvedEmail = await resolvePassengerEmail(db, passengerKey, { email: opts.email });
+    await db.ref().update({
+      [`passengerIndex/email/${emailKey}`]: {
+        key: passengerKey,
+        uid: passengerKey,
+        email: resolvedEmail || opts.email.trim().toLowerCase(),
+        updatedAt: new Date().toISOString(),
+      },
+      [`passengerIndex/key/${passengerKey}`]: {
+        key: passengerKey,
+        uid: passengerKey,
+        ...(resolvedEmail.includes("@") ? { email: resolvedEmail } : {}),
+        updatedAt: new Date().toISOString(),
+      },
+    });
   }
-
-  if (opts.phone) {
-    for (const candidate of phoneIndexCandidates(opts.phone)) {
-      updates[`passengerIndex/phone/${candidate}`] = { key: passengerKey, updatedAt: nowIso };
-    }
-  }
-
-  if (Object.keys(updates).length === 0) return;
-  await db.ref().update(updates);
 }
 
 /**

@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { getDatabase } from "../lib/firebase";
+import { getAuth, getDatabase } from "../lib/firebase";
 import { registerScheduledDispatch } from "../lib/scheduler";
-import { normalizeEmailKey } from "../lib/passengerKey";
+import { normalizeEmailKey, upsertPhoneIndex } from "../lib/passengerKey";
 import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
 import { findActiveBooking, normalizePhoneKey } from "../lib/active-booking-guard";
 import { searchNzPlaces } from "../lib/geocode-search";
@@ -180,6 +180,29 @@ bookingsRouter.post("/bookings", async (req, res) => {
     return;
   }
 
+  // Signed-in Firebase Auth uid required — no guest / web_* booking keys.
+  const paxKey = String(passengerKey || "").trim();
+  if (!paxKey || paxKey.startsWith("web_")) {
+    res.status(401).json({
+      error: "Sign in required to book. Guest booking is not available.",
+      code: "AUTH_REQUIRED",
+    });
+    return;
+  }
+  const authHeader = String(req.headers.authorization || "");
+  if (authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded = await getAuth().verifyIdToken(authHeader.slice(7).trim());
+      if (decoded.uid !== paxKey) {
+        res.status(403).json({ error: "passengerKey does not match signed-in user." });
+        return;
+      }
+    } catch {
+      res.status(401).json({ error: "Session expired — please sign in again.", code: "AUTH_EXPIRED" });
+      return;
+    }
+  }
+
   const stopList = Array.isArray(stopsRaw)
     ? stopsRaw
         .filter((s) => s && String(s.address || "").trim())
@@ -273,7 +296,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     try {
       const walletDb = getDatabase();
       const walletPassengerRef = {
-        key: passengerKey,
+        key: paxKey,
         phone: normalizedPhone,
         email: passengerEmail?.trim() ?? emailKey,
       };
@@ -525,33 +548,15 @@ bookingsRouter.post("/bookings", async (req, res) => {
       })
     );
 
-    if (passengerKey) {
+    if (paxKey) {
       writes.push(
-        db.ref(`/Passengerjobs/${passengerKey}/${bookingId}`).set({
+        db.ref(`/Passengerjobs/${paxKey}/${bookingId}`).set({
           ...booking,
-        })
+        }),
       );
 
-      // Phone index uses the same digits-only normalisation as the booking write
-      writes.push(db.ref(`passengerIndex/phone/${normalizedPhone}`).set({ key: passengerKey }));
-
-      if (passengerEmail) {
-        const emailKey = normalizeEmailKey(passengerEmail);
-        writes.push(db.ref(`passengerIndex/email/${emailKey}`).set({ key: passengerKey }));
-      }
-
-      // Bidirectional resolver row for SA Portal admin wallet endpoints.
-      // SA dev confirmed: Option 1 — keep wallet storage at passengerWallet/{key}
-      // forever; resolve uid→key via this index. We write the `key` side here
-      // with a createdAt stamp. The `uid` side is added later, at first mobile
-      // Firebase Auth sign-in (not implemented yet — Phase B).
-      // Use update() not set() so we don't clobber a UID that was added later.
-      writes.push(
-        db.ref(`passengerIndex/key/${passengerKey}`).update({
-          key: passengerKey,
-          createdAt: now.toISOString(),
-        })
-      );
+      // Merge phone/email/key indexes — never .set({key}) which wipes email.
+      writes.push(upsertPhoneIndex(db, normalizedPhone, paxKey, passengerEmail || undefined));
     }
 
     await Promise.all(writes);

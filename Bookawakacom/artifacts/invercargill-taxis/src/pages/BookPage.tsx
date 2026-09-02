@@ -818,7 +818,12 @@ export default function BookPage() {
 
     const res = await fetch(`${import.meta.env.BASE_URL}api/bookings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(getPassengerSession()?.idToken
+          ? { Authorization: `Bearer ${getPassengerSession()!.idToken}` }
+          : {}),
+      },
       body: JSON.stringify({
         jobId,
         passengerKey,

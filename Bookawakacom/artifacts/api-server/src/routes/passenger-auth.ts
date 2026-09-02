@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { FIREBASE_CONFIG, getAuth, getDatabase } from "../lib/firebase";
-import { normalizeEmailKey, phoneIndexCandidates } from "../lib/passengerKey";
+import { normalizeEmailKey, phoneIndexCandidates, upsertPhoneIndex } from "../lib/passengerKey";
 
 const passengerAuthRouter = Router();
 
@@ -30,12 +30,33 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
   }
 
   const db = getDatabase();
+  let indexedUid = "";
   for (const c of phoneIndexCandidates(digits)) {
     const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
     const row = snap.val() as Record<string, unknown> | null;
-    const email = String(row?.email || "").trim();
-    if (email) return email.toLowerCase();
+    if (!row) continue;
+    const email = String(row.email || "").trim();
+    if (email.includes("@")) return email.toLowerCase();
+    const uid = String(row.uid || row.key || "").trim();
+    if (uid && !indexedUid) indexedUid = uid;
   }
+
+  if (indexedUid) {
+    try {
+      const userSnap = await db.ref(`users/${indexedUid}`).once("value");
+      const userEmail = String(userSnap.val()?.email || "").trim();
+      if (userEmail.includes("@")) return userEmail.toLowerCase();
+    } catch {
+      /* continue */
+    }
+    try {
+      const authUser = await getAuth().getUser(indexedUid);
+      if (authUser.email) return authUser.email.toLowerCase();
+    } catch {
+      /* continue */
+    }
+  }
+
   return phoneAuthEmail(digits);
 }
 
@@ -53,17 +74,6 @@ async function identityToolkit(
   );
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { ok: res.ok, status: res.status, json };
-}
-
-async function writePhoneIndex(digits: string, uid: string, email: string): Promise<void> {
-  if (!digits) return;
-  const db = getDatabase();
-  const payload = { key: uid, email, uid, updatedAt: Date.now() };
-  await Promise.all(
-    phoneIndexCandidates(digits).map((c) =>
-      db.ref(`passengerIndex/phone/${c}`).set(payload).catch(() => undefined),
-    ),
-  );
 }
 
 passengerAuthRouter.post("/passenger-auth/register", async (req: Request, res: Response) => {
@@ -111,7 +121,7 @@ passengerAuthRouter.post("/passenger-auth/register", async (req: Request, res: R
       createdAt: Date.now(),
       source: "website",
     });
-    await writePhoneIndex(phoneDigits, uid, authEmail);
+    await upsertPhoneIndex(db, phoneDigits, uid, authEmail);
     if (emailRaw) {
       await db.ref(`passengerIndex/email/${normalizeEmailKey(emailRaw)}`).set({
         key: uid,
