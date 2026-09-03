@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import type { DataSnapshot } from "firebase-admin/database";
 import { FIREBASE_CONFIG, getAuth, getDatabase } from "../lib/firebase";
-import { normalizeEmailKey, phoneIndexCandidates, upsertPhoneIndex } from "../lib/passengerKey";
+import { normalizeEmailKey, phoneIndexCandidates, toCanonicalPhone, upsertPhoneIndex } from "../lib/passengerKey";
 
 const passengerAuthRouter = Router();
 
@@ -36,7 +36,8 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
 
   const db = getDatabase();
   let indexedUid = "";
-  for (const c of phoneIndexCandidates(digits)) {
+  // Canonical first; phoneIndexCandidates also includes legacy variants for migration.
+  for (const c of phoneIndexCandidates(toCanonicalPhone(digits) || digits)) {
     const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
     const row = snap.val() as Record<string, unknown> | null;
     if (!row) continue;
@@ -111,7 +112,9 @@ passengerAuthRouter.post("/passenger-auth/register", async (req: Request, res: R
     const emailRaw = String(req.body?.email || "").trim().toLowerCase();
     const phone = String(req.body?.phone || "").trim();
     const password = String(req.body?.password || "");
-    const phoneDigits = normalisePhone(phone);
+    // UI sends already-canonical digits (e.g. "6421123567"); still run through
+    // toCanonicalPhone so free-text / legacy callers stay consistent.
+    const phoneDigits = toCanonicalPhone(phone);
 
     if (!name || !emailRaw || password.length < 6) {
       return res.status(400).json({ error: "Name, email, and a password of at least 6 characters are required." });

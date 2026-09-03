@@ -1,9 +1,9 @@
 import { Router } from "express";
 import { getAuth, getDatabase } from "../lib/firebase";
 import { registerScheduledDispatch } from "../lib/scheduler";
-import { normalizeEmailKey, upsertPhoneIndex } from "../lib/passengerKey";
+import { normalizeEmailKey, toCanonicalPhone, upsertPhoneIndex } from "../lib/passengerKey";
 import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
-import { findActiveBooking, normalizePhoneKey } from "../lib/active-booking-guard";
+import { findActiveBooking } from "../lib/active-booking-guard";
 import { searchNzPlaces } from "../lib/geocode-search";
 import { estimateDispatchLeadMins } from "../lib/estimateDispatchLeadMins";
 import { resolveCompanyBaseLocation } from "../lib/resolveCompanyBaseLocation";
@@ -223,10 +223,9 @@ bookingsRouter.post("/bookings", async (req, res) => {
     : "";
   const Stops = stopList.map((s) => s.address);
 
-  // Normalise phone to digits-only before any storage. The SA driver app keys
-  // passenger ratings (and other passenger lookups) by digits-only phone, so
-  // anything written with `+`, spaces, or hyphens breaks the rating link.
-  const normalizedPhone = normalizePhoneKey(passengerPhone);
+  // Canonical digits-only phone (e.g. 6421123567). UI sends this already;
+  // toCanonicalPhone also normalises any legacy free-text callers.
+  const normalizedPhone = toCanonicalPhone(passengerPhone);
   if (!normalizedPhone) {
     res.status(400).json({ error: "passengerPhone must contain digits" });
     return;

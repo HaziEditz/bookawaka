@@ -1,5 +1,8 @@
 /**
- * Heal passengerIndex/phone rows that are missing email OR poisoned with web_* keys.
+ * Heal + consolidate passengerIndex/phone rows:
+ * 1. Fix missing email / web_* poison keys
+ * 2. Collapse multi-variant rows (0… / bare / 64…) into ONE canonical key
+ *
  * Usage:
  *   node scripts/heal-phone-index-emails.mjs           # dry-run
  *   node scripts/heal-phone-index-emails.mjs --apply   # write
@@ -38,13 +41,29 @@ function loadEnv() {
 
 loadEnv();
 
+const KNOWN_CC = ["64", "61", "1", "44", "65", "91", "86", "81", "82", "33", "49", "39", "34", "7", "55", "52", "27", "66", "62", "63", "84", "60"];
+
+function toCanonical(phone) {
+  let d = String(phone || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("0")) d = d.replace(/^0+/, "");
+  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length > cc.length + 5)) return d;
+  return `64${d}`;
+}
+
 function phoneCandidates(digits) {
   const d = String(digits || "").replace(/\D/g, "");
-  const out = new Set([d]);
-  if (d.startsWith("0")) out.add(d.slice(1));
-  else if (d.length >= 8) out.add(`0${d}`);
-  if (d.startsWith("64") && d.length > 2) out.add(d.slice(2));
-  else if (d.length >= 8 && !d.startsWith("64")) out.add(`64${d}`);
+  const out = new Set([d, toCanonical(d)]);
+  if (d.startsWith("0")) {
+    out.add(d.slice(1));
+    out.add(`64${d.slice(1)}`);
+  } else if (d.length >= 8) {
+    out.add(`0${d}`);
+  }
+  if (d.startsWith("64") && d.length > 2) {
+    out.add(d.slice(2));
+    out.add(`0${d.slice(2)}`);
+  }
   return [...out].filter(Boolean);
 }
 
@@ -93,30 +112,44 @@ for (const [uid, row] of Object.entries(users)) {
 let missing = 0;
 let poisoned = 0;
 let healed = 0;
+let consolidated = 0;
 let unresolved = 0;
 const samples = [];
+const seenCanonical = new Set();
 
 for (const k of keys) {
   const row = phoneIdx[k] || {};
   const email = String(row.email || "").trim();
   const rowKey = String(row.uid || row.key || "").trim();
-  const needsHeal = !email.includes("@") || isPoisonKey(rowKey);
-  if (!needsHeal) continue;
+  const canonical = toCanonical(k);
+  if (!canonical) continue;
 
-  if (!email.includes("@")) missing++;
-  if (isPoisonKey(rowKey)) poisoned++;
+  // Skip if we already processed this canonical group
+  if (seenCanonical.has(canonical)) continue;
+  seenCanonical.add(canonical);
 
-  let uid = !isPoisonKey(rowKey) ? rowKey : "";
+  const variants = phoneCandidates(canonical);
+  const groupRows = variants
+    .filter((c) => phoneIdx[c])
+    .map((c) => ({ key: c, row: phoneIdx[c] }));
+
+  // Pick best uid + email from the group
+  let uid = "";
+  let resolved = "";
+  for (const { row: r } of groupRows) {
+    const rk = String(r.uid || r.key || "").trim();
+    const re = String(r.email || "").trim();
+    if (!uid && rk && !isPoisonKey(rk)) uid = rk;
+    if (!resolved.includes("@") && re.includes("@")) resolved = re;
+  }
   if (!uid) {
-    for (const c of phoneCandidates(k)) {
+    for (const c of variants) {
       if (phoneToUid.has(c)) {
         uid = phoneToUid.get(c);
         break;
       }
     }
   }
-
-  let resolved = email.includes("@") ? email : "";
   if (uid && !resolved.includes("@")) {
     const userSnap = users[uid];
     resolved = String(userSnap?.email || "").trim();
@@ -130,17 +163,33 @@ for (const k of keys) {
     }
   }
 
+  const needsHeal = groupRows.some((g) => {
+    const e = String(g.row.email || "").trim();
+    const rk = String(g.row.uid || g.row.key || "").trim();
+    return !e.includes("@") || isPoisonKey(rk);
+  });
+  const hasVariants = groupRows.length > 1 || (groupRows.length === 1 && groupRows[0].key !== canonical);
+
+  if (needsHeal) {
+    if (groupRows.some((g) => !String(g.row.email || "").includes("@"))) missing++;
+    if (groupRows.some((g) => isPoisonKey(String(g.row.uid || g.row.key || "")))) poisoned++;
+  }
+
   if (!uid || isPoisonKey(uid) || !resolved.includes("@")) {
-    unresolved++;
-    if (samples.length < 10) {
-      samples.push({
-        phoneKey: k,
-        uid: rowKey.slice(0, 12),
-        reason: !uid || isPoisonKey(uid) ? "no_auth_uid" : "no_email",
-      });
+    if (needsHeal) {
+      unresolved++;
+      if (samples.length < 10) {
+        samples.push({
+          phoneKey: k,
+          uid: rowKey.slice(0, 12),
+          reason: !uid || isPoisonKey(uid) ? "no_auth_uid" : "no_email",
+        });
+      }
     }
     continue;
   }
+
+  if (!needsHeal && !hasVariants) continue; // already clean + single canonical
 
   const payload = {
     key: uid,
@@ -149,8 +198,13 @@ for (const k of keys) {
     updatedAt: Date.now(),
   };
   const updates = {};
-  for (const c of phoneCandidates(k)) {
-    updates[`passengerIndex/phone/${c}`] = payload;
+  // Write the ONE canonical row
+  updates[`passengerIndex/phone/${canonical}`] = payload;
+  // Delete all legacy variants
+  for (const c of variants) {
+    if (c !== canonical && phoneIdx[c]) {
+      updates[`passengerIndex/phone/${c}`] = null;
+    }
   }
   updates[`passengerIndex/email/${resolved.toLowerCase().replace(/\./g, ",").replace(/@/g, "__at__")}`] = {
     key: uid,
@@ -167,13 +221,15 @@ for (const k of keys) {
   if (APPLY) {
     await db.ref().update(updates);
   }
-  healed++;
+  if (needsHeal) healed++;
+  if (hasVariants) consolidated++;
   if (samples.length < 10) {
     samples.push({
-      phoneKeyPrefix: k.slice(0, 3),
+      canonical,
+      variantsRemoved: variants.filter((c) => c !== canonical && phoneIdx[c]),
       uid: uid.slice(0, 10),
       emailDomain: resolved.split("@")[1],
-      displacedPoison: isPoisonKey(rowKey),
+      healedPoison: needsHeal,
       apply: APPLY,
     });
   }
@@ -184,9 +240,11 @@ console.log(
     {
       mode: APPLY ? "APPLY" : "DRY_RUN",
       totalPhoneKeys: keys.length,
+      uniqueCanonical: seenCanonical.size,
       missingEmail: missing,
       poisonedWebKey: poisoned,
       healed,
+      consolidated,
       unresolved,
       samples,
     },

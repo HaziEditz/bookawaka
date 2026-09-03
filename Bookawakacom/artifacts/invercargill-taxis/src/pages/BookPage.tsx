@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import AddressInput from "@/components/AddressInput";
 import BookingMapPanel from "@/components/BookingMapPanel";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
+import PhoneField from "@/components/PhoneField";
 import { getPassengerSession } from "@/lib/passengerKey";
 import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
@@ -1422,7 +1423,12 @@ export default function BookPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="passengerPhone" className="font-semibold text-sm">Phone <span className="text-destructive">*</span></Label>
-                    <Input id="passengerPhone" name="passengerPhone" value={form.passengerPhone} onChange={handleChange} placeholder="e.g. 021 123 4567" required className="rounded-xl h-11" />
+                    <PhoneField
+                      id="passengerPhone"
+                      value={form.passengerPhone}
+                      onChange={(canonical) => setForm((prev) => ({ ...prev, passengerPhone: canonical }))}
+                      required
+                    />
                   </div>
                 </div>
 

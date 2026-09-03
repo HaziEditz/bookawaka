@@ -1,4 +1,5 @@
 import { getDatabase } from "./firebase";
+import { phoneIndexCandidates, toCanonicalPhone } from "./passengerKey";
 
 const TERMINAL = new Set([
   "completed",
@@ -24,13 +25,21 @@ export async function findActiveBooking(
   serviceType: string,
   excludeJobId?: string
 ): Promise<ActiveBookingMatch | null> {
-  const normalizedPhone = normalizePhoneKey(passengerPhone);
+  const canonical = toCanonicalPhone(passengerPhone);
   const normalizedServiceType = serviceType.toLowerCase().trim();
-  if (!normalizedPhone || !normalizedServiceType) return null;
+  if (!canonical || !normalizedServiceType) return null;
 
   const db = getDatabase();
-  const idxSnap = await db.ref(`passengerIndex/phone/${normalizedPhone}`).once("value");
-  const existingKey: string | undefined = idxSnap.val()?.key;
+  // Canonical first, then legacy variants so pre-migration rows still resolve.
+  let existingKey: string | undefined;
+  for (const candidate of phoneIndexCandidates(canonical)) {
+    const idxSnap = await db.ref(`passengerIndex/phone/${candidate}`).once("value");
+    const key = idxSnap.val()?.key;
+    if (key) {
+      existingKey = String(key);
+      break;
+    }
+  }
   if (!existingKey) return null;
 
   const jobsSnap = await db.ref(`Passengerjobs/${existingKey}`).once("value");

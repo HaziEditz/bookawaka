@@ -14,6 +14,28 @@ export function normalizePhoneKey(phone: string): string {
   return phone.replace(/[^0-9]/g, "");
 }
 
+/**
+ * Produce ONE canonical phone key for passengerIndex/phone/{digits}.
+ * Default NZ (+64): strip leading 0, ensure starts with country code.
+ * e.g. "0211234567" → "64211234567", "211234567" → "64211234567",
+ *      "64211234567" → "64211234567".
+ *
+ * If the number already starts with a known non-NZ country code (61, 1, 44…),
+ * leave it as-is (already international).
+ */
+const KNOWN_CC = ["64", "61", "1", "44", "65", "91", "86", "81", "82", "33", "49", "39", "34", "7", "55", "52", "27", "66", "62", "63", "84", "60"];
+
+export function toCanonicalPhone(phone: string): string {
+  let d = normalizePhoneKey(phone);
+  if (!d) return "";
+  // Strip a single leading trunk-zero (NZ/AU style) before prepending CC
+  if (d.startsWith("0")) d = d.replace(/^0+/, "");
+  // Already starts with a known country code → leave as-is
+  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length > cc.length + 5)) return d;
+  // Default: NZ +64
+  return `64${d}`;
+}
+
 export function normalizeEmailKey(email: string): string {
   return email.toLowerCase().replace(/\./g, ",").replace(/@/g, "__at__");
 }
@@ -25,17 +47,33 @@ export function emailIndexKey(email: string): string {
   return e.includes("@") ? normalizeEmailKey(e) : e;
 }
 
-/** NZ phone variants for passengerIndex/phone/{digits} lookups. */
+/**
+ * Lookup candidates for passengerIndex/phone/{digits}.
+ * Canonical form is ALWAYS first. Legacy variants are included only so
+ * existing multi-format rows still resolve during the migration window.
+ * New writes use toCanonicalPhone() exclusively — never these variants.
+ */
 export function phoneIndexCandidates(digits: string): string[] {
-  const out = new Set<string>();
+  const out: string[] = [];
   const d = normalizePhoneKey(digits);
   if (!d) return [];
-  out.add(d);
-  if (d.startsWith("0")) out.add(d.slice(1));
-  else if (d.length >= 8) out.add(`0${d}`);
-  if (d.startsWith("64") && d.length > 2) out.add(d.slice(2));
-  else if (d.length >= 8 && !d.startsWith("64")) out.add(`64${d}`);
-  return [...out];
+  const canonical = toCanonicalPhone(d);
+  out.push(canonical);
+  if (d !== canonical) out.push(d);
+  // Legacy local / trunk-zero / bare-national forms (read-only fallback)
+  if (d.startsWith("0")) {
+    const bare = d.slice(1);
+    if (bare && !out.includes(bare)) out.push(bare);
+    if (!out.includes(`64${bare}`)) out.push(`64${bare}`);
+  } else if (!d.startsWith("64") && d.length >= 8) {
+    if (!out.includes(`0${d}`)) out.push(`0${d}`);
+  }
+  if (d.startsWith("64") && d.length > 2) {
+    const bare = d.slice(2);
+    if (bare && !out.includes(bare)) out.push(bare);
+    if (!out.includes(`0${bare}`)) out.push(`0${bare}`);
+  }
+  return [...new Set(out)];
 }
 
 async function lookupEmailInIndex(
@@ -75,6 +113,7 @@ async function scanWalletByPhone(
   digits: string,
 ): Promise<string | null> {
   const candidates = new Set(phoneIndexCandidates(digits));
+  candidates.add(toCanonicalPhone(digits));
   const snap = await db.ref("passengerWallet").once("value");
   if (!snap.exists()) return null;
 
@@ -87,7 +126,7 @@ async function scanWalletByPhone(
     const recordPhone = normalizePhoneKey(
       String(w.phone ?? w.passengerPhone ?? w.Phone ?? w.PhoneNo ?? ""),
     );
-    if (recordPhone && candidates.has(recordPhone)) {
+    if (recordPhone && (candidates.has(recordPhone) || candidates.has(toCanonicalPhone(recordPhone)))) {
       found = child.key;
     }
   });
@@ -140,8 +179,10 @@ export async function resolvePassengerEmail(
 }
 
 /**
- * Upsert phone index for all NZ digit variants. Always merges via update() so
- * we never wipe an existing email with a key-only write.
+ * Upsert ONE canonical phone-index row.
+ * No longer writes the 0 / bare / 64 variant triples — just the single
+ * canonical key produced by toCanonicalPhone().
+ * Also removes matching legacy variant rows for the same uid.
  */
 export async function upsertPhoneIndex(
   db: FirebaseDatabase,
@@ -149,10 +190,10 @@ export async function upsertPhoneIndex(
   uid: string,
   email?: string,
 ): Promise<void> {
-  const digits = normalizePhoneKey(phone);
-  if (!digits || digits.length < 7 || !uid || uid.startsWith("web_") || uid === "guest") return;
+  const canonical = toCanonicalPhone(phone);
+  if (!canonical || canonical.length < 7 || !uid || uid.startsWith("web_") || uid === "guest") return;
 
-  const resolvedEmail = await resolvePassengerEmail(db, uid, { email, phone: digits });
+  const resolvedEmail = await resolvePassengerEmail(db, uid, { email, phone: canonical });
   // Always require a real email so we never leave/write key-only poison rows.
   if (!resolvedEmail.includes("@")) return;
 
@@ -163,10 +204,25 @@ export async function upsertPhoneIndex(
     updatedAt: Date.now(),
   };
 
-  // Displace web_* / email-less poison rows: Admin update() replaces the node fields we set.
-  const updates: Record<string, Record<string, string | number>> = {};
-  for (const candidate of phoneIndexCandidates(digits)) {
-    updates[`passengerIndex/phone/${candidate}`] = phonePayload;
+  const updates: Record<string, Record<string, string | number> | null> = {};
+  // Write the single canonical row
+  updates[`passengerIndex/phone/${canonical}`] = phonePayload;
+
+  // Clean up legacy variant rows so the index converges to one key per number.
+  // Only remove variants that point at the SAME uid (don't clobber another account).
+  const legacy = phoneIndexCandidates(canonical).filter((c) => c !== canonical);
+  for (const c of legacy) {
+    try {
+      const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
+      const row = snap.val() as Record<string, unknown> | null;
+      if (!row) continue;
+      const rowUid = String(row.uid || row.key || "");
+      if (rowUid === uid || !rowUid || rowUid.startsWith("web_")) {
+        updates[`passengerIndex/phone/${c}`] = null; // delete
+      }
+    } catch {
+      /* best-effort cleanup */
+    }
   }
 
   if (resolvedEmail.includes("@")) {

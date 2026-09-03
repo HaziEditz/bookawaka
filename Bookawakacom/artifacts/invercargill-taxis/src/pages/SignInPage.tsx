@@ -67,7 +67,7 @@ export default function SignInPage() {
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
                 autoComplete="username"
-                placeholder="you@email.com or 021…"
+                placeholder="you@email.com or +64 21…"
               />
             </div>
           </div>
