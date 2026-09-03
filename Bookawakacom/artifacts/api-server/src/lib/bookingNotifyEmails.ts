@@ -13,6 +13,18 @@ function bookingDetailsHtml(booking: Record<string, any>, scheduledLabel: string
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Phone</td><td style="padding:8px 0;color:#555;">${booking.PassengerPhone ?? ""}</td></tr>
       ${booking.PassengerEmail ? `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Email</td><td style="padding:8px 0;color:#555;">${booking.PassengerEmail}</td></tr>` : ""}
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Pick Up</td><td style="padding:8px 0;color:#555;">${booking.PickAddress ?? ""}</td></tr>
+      ${(() => {
+        const stops = Array.isArray(booking.Stops)
+          ? booking.Stops
+          : Array.isArray(booking.stops)
+            ? booking.stops.map((s: unknown) =>
+                typeof s === "string" ? s : String((s as { address?: string })?.address || ""),
+              )
+            : [];
+        const labels = stops.map((s: string) => String(s || "").trim()).filter(Boolean);
+        if (!labels.length) return "";
+        return `<tr><td style="padding:8px 0;font-weight:bold;color:#333;">Stops</td><td style="padding:8px 0;color:#555;">${labels.join(" → ")}</td></tr>`;
+      })()}
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Drop Off</td><td style="padding:8px 0;color:#555;">${booking.DropAddress ?? ""}</td></tr>
       <tr><td style="padding:8px 0;font-weight:bold;color:#333;">Scheduled</td><td style="padding:8px 0;color:#555;">${scheduledLabel}</td></tr>
       ${paymentNote}

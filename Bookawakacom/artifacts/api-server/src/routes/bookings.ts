@@ -421,6 +421,8 @@ bookingsRouter.post("/bookings", async (req, res) => {
     Info: notes ?? "",
     PassengerEmail: passengerEmail ?? "",
     PassengerName: passengerName,
+    Name: passengerName,
+    name: passengerName,
     PassengerPhone: normalizedPhone,
     passengerPhone: normalizedPhone, // lowercase — SA driver app reads this for rating linkage
     PhoneNo: normalizedPhone, // SA legacy field name

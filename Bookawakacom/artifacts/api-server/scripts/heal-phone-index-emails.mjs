@@ -1,5 +1,5 @@
 /**
- * Heal passengerIndex/phone rows missing email.
+ * Heal passengerIndex/phone rows that are missing email OR poisoned with web_* keys.
  * Usage:
  *   node scripts/heal-phone-index-emails.mjs           # dry-run
  *   node scripts/heal-phone-index-emails.mjs --apply   # write
@@ -48,6 +48,11 @@ function phoneCandidates(digits) {
   return [...out].filter(Boolean);
 }
 
+function isPoisonKey(key) {
+  const k = String(key || "").trim();
+  return !k || k === "guest" || k.startsWith("web_");
+}
+
 function init() {
   if (getApps().length) return;
   const projectId = process.env.FIREBASE_PROJECT_ID || "bookawaka2026-564e1";
@@ -71,7 +76,22 @@ const auth = getAuth();
 
 const phoneIdx = (await db.ref("passengerIndex/phone").once("value")).val() || {};
 const keys = Object.keys(phoneIdx);
+const usersSnap = await db.ref("users").once("value");
+const users = usersSnap.val() || {};
+
+/** Build phone → Auth uid map from users/* (skips web_*). */
+const phoneToUid = new Map();
+for (const [uid, row] of Object.entries(users)) {
+  if (isPoisonKey(uid) || !row || typeof row !== "object") continue;
+  const phone = String(row.phone || row.Phone || row.PhoneNo || "").replace(/\D/g, "");
+  if (!phone) continue;
+  for (const c of phoneCandidates(phone)) {
+    if (!phoneToUid.has(c)) phoneToUid.set(c, uid);
+  }
+}
+
 let missing = 0;
+let poisoned = 0;
 let healed = 0;
 let unresolved = 0;
 const samples = [];
@@ -79,13 +99,27 @@ const samples = [];
 for (const k of keys) {
   const row = phoneIdx[k] || {};
   const email = String(row.email || "").trim();
-  if (email.includes("@")) continue;
-  missing++;
-  const uid = String(row.uid || row.key || "").trim();
-  let resolved = "";
-  if (uid) {
-    const userSnap = await db.ref(`users/${uid}`).once("value");
-    resolved = String(userSnap.val()?.email || "").trim();
+  const rowKey = String(row.uid || row.key || "").trim();
+  const needsHeal = !email.includes("@") || isPoisonKey(rowKey);
+  if (!needsHeal) continue;
+
+  if (!email.includes("@")) missing++;
+  if (isPoisonKey(rowKey)) poisoned++;
+
+  let uid = !isPoisonKey(rowKey) ? rowKey : "";
+  if (!uid) {
+    for (const c of phoneCandidates(k)) {
+      if (phoneToUid.has(c)) {
+        uid = phoneToUid.get(c);
+        break;
+      }
+    }
+  }
+
+  let resolved = email.includes("@") ? email : "";
+  if (uid && !resolved.includes("@")) {
+    const userSnap = users[uid];
+    resolved = String(userSnap?.email || "").trim();
     if (!resolved.includes("@")) {
       try {
         const au = await auth.getUser(uid);
@@ -95,10 +129,15 @@ for (const k of keys) {
       }
     }
   }
-  if (!resolved.includes("@")) {
+
+  if (!uid || isPoisonKey(uid) || !resolved.includes("@")) {
     unresolved++;
-    if (samples.length < 8) {
-      samples.push({ phoneKey: k, uid: uid.slice(0, 10), reason: "no_email" });
+    if (samples.length < 10) {
+      samples.push({
+        phoneKey: k,
+        uid: rowKey.slice(0, 12),
+        reason: !uid || isPoisonKey(uid) ? "no_auth_uid" : "no_email",
+      });
     }
     continue;
   }
@@ -129,11 +168,12 @@ for (const k of keys) {
     await db.ref().update(updates);
   }
   healed++;
-  if (samples.length < 8) {
+  if (samples.length < 10) {
     samples.push({
       phoneKeyPrefix: k.slice(0, 3),
       uid: uid.slice(0, 10),
       emailDomain: resolved.split("@")[1],
+      displacedPoison: isPoisonKey(rowKey),
       apply: APPLY,
     });
   }
@@ -145,6 +185,7 @@ console.log(
       mode: APPLY ? "APPLY" : "DRY_RUN",
       totalPhoneKeys: keys.length,
       missingEmail: missing,
+      poisonedWebKey: poisoned,
       healed,
       unresolved,
       samples,

@@ -150,18 +150,20 @@ export async function upsertPhoneIndex(
   email?: string,
 ): Promise<void> {
   const digits = normalizePhoneKey(phone);
-  if (!digits || digits.length < 7 || !uid) return;
+  if (!digits || digits.length < 7 || !uid || uid.startsWith("web_") || uid === "guest") return;
 
   const resolvedEmail = await resolvePassengerEmail(db, uid, { email, phone: digits });
+  // Always require a real email so we never leave/write key-only poison rows.
+  if (!resolvedEmail.includes("@")) return;
+
   const phonePayload: Record<string, string | number> = {
     key: uid,
     uid,
+    email: resolvedEmail,
     updatedAt: Date.now(),
   };
-  if (resolvedEmail.includes("@")) {
-    phonePayload.email = resolvedEmail;
-  }
 
+  // Displace web_* / email-less poison rows: Admin update() replaces the node fields we set.
   const updates: Record<string, Record<string, string | number>> = {};
   for (const candidate of phoneIndexCandidates(digits)) {
     updates[`passengerIndex/phone/${candidate}`] = phonePayload;

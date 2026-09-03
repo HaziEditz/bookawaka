@@ -18,6 +18,10 @@ function looksLikeEmail(raw: string): boolean {
   return String(raw || "").includes("@");
 }
 
+function isPoisonPassengerKey(key: string): boolean {
+  return !key || key === "guest" || key.startsWith("web_");
+}
+
 async function resolveLoginEmail(identifier: string): Promise<string> {
   const trimmed = String(identifier || "").trim();
   if (looksLikeEmail(trimmed)) return trimmed.toLowerCase();
@@ -35,10 +39,13 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
     const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
     const row = snap.val() as Record<string, unknown> | null;
     if (!row) continue;
+    const key = String(row.key || row.uid || "").trim();
     const email = String(row.email || "").trim();
+    // Skip web_* / guest poison rows that have no usable email.
+    if (isPoisonPassengerKey(key) && !email.includes("@")) continue;
     if (email.includes("@")) return email.toLowerCase();
     const uid = String(row.uid || row.key || "").trim();
-    if (uid && !indexedUid) indexedUid = uid;
+    if (uid && !isPoisonPassengerKey(uid) && !indexedUid) indexedUid = uid;
   }
 
   if (indexedUid) {
@@ -55,6 +62,27 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
     } catch {
       /* continue */
     }
+  }
+
+  // Scan users by phone when index is missing or poisoned.
+  try {
+    const candidateSet = new Set(phoneIndexCandidates(digits));
+    const usersSnap = await db.ref("users").once("value");
+    if (usersSnap.exists()) {
+      let foundEmail = "";
+      usersSnap.forEach((child) => {
+        if (foundEmail || !child.key || isPoisonPassengerKey(child.key)) return;
+        const u = child.val() as Record<string, unknown> | null;
+        if (!u || typeof u !== "object") return;
+        const phone = normalisePhone(String(u.phone ?? u.Phone ?? u.PhoneNo ?? ""));
+        if (!phone || !candidateSet.has(phone)) return;
+        const email = String(u.email ?? "").trim();
+        if (email.includes("@")) foundEmail = email.toLowerCase();
+      });
+      if (foundEmail) return foundEmail;
+    }
+  } catch {
+    /* continue */
   }
 
   return phoneAuthEmail(digits);
