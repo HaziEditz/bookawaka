@@ -46,8 +46,12 @@ const KNOWN_CC = ["64", "61", "1", "44", "65", "91", "86", "81", "82", "33", "49
 function toCanonical(phone) {
   let d = String(phone || "").replace(/\D/g, "");
   if (!d) return "";
-  if (d.startsWith("0")) d = d.replace(/^0+/, "");
-  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length > cc.length + 5)) return d;
+  // Leading trunk-zero = local national number — always default to NZ +64.
+  // Do NOT match KNOWN_CC after stripping 0 (027… must not become +27 ZA).
+  const hadTrunkZero = d.startsWith("0");
+  if (hadTrunkZero) d = d.replace(/^0+/, "");
+  if (hadTrunkZero) return d ? `64${d}` : "";
+  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length >= cc.length + 8)) return d;
   return `64${d}`;
 }
 

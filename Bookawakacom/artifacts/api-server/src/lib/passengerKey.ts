@@ -28,10 +28,16 @@ const KNOWN_CC = ["64", "61", "1", "44", "65", "91", "86", "81", "82", "33", "49
 export function toCanonicalPhone(phone: string): string {
   let d = normalizePhoneKey(phone);
   if (!d) return "";
-  // Strip a single leading trunk-zero (NZ/AU style) before prepending CC
-  if (d.startsWith("0")) d = d.replace(/^0+/, "");
-  // Already starts with a known country code → leave as-is
-  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length > cc.length + 5)) return d;
+  // A leading trunk-zero means a LOCAL national number (NZ/AU style).
+  // Never treat the digits after stripping 0 as an international CC —
+  // e.g. 0276698294 must become 64276698294, NOT stay as 276698294 (+27 ZA).
+  const hadTrunkZero = d.startsWith("0");
+  if (hadTrunkZero) d = d.replace(/^0+/, "");
+  if (hadTrunkZero) return d ? `64${d}` : "";
+  // Already starts with a known country code with enough national digits.
+  // Require >= 8 national digits so short NZ mobiles like 276698294 (9 digits,
+  // looks like +27) still default to NZ +64 rather than South Africa.
+  if (KNOWN_CC.some((cc) => d.startsWith(cc) && d.length >= cc.length + 8)) return d;
   // Default: NZ +64
   return `64${d}`;
 }
