@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import type { DataSnapshot } from "firebase-admin/database";
 import { FIREBASE_CONFIG, getAuth, getDatabase } from "../lib/firebase";
 import { normalizeEmailKey, phoneIndexCandidates, upsertPhoneIndex } from "../lib/passengerKey";
 
@@ -70,7 +71,7 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
     const usersSnap = await db.ref("users").once("value");
     if (usersSnap.exists()) {
       let foundEmail = "";
-      usersSnap.forEach((child) => {
+      usersSnap.forEach((child: DataSnapshot) => {
         if (foundEmail || !child.key || isPoisonPassengerKey(child.key)) return;
         const u = child.val() as Record<string, unknown> | null;
         if (!u || typeof u !== "object") return;
