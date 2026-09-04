@@ -1635,7 +1635,7 @@ export default function BookPage() {
                         ))}
                       </select>
                       <p className="text-xs text-muted-foreground">
-                        {passengers >= 5 ? "5+ passengers require a van." : "Any vehicle type for 1–4 passengers."}
+                        {passengers >= 5 ? "5+ passengers require a van." : "Any = first suitable vehicle. A specific type is exclusive — no silent substitute."}
                       </p>
                     </div>
                     <div className="space-y-2">
