@@ -45,7 +45,14 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
     const email = String(row.email || "").trim();
     // Skip web_* / guest poison rows that have no usable email.
     if (isPoisonPassengerKey(key) && !email.includes("@")) continue;
-    if (email.includes("@")) return email.toLowerCase();
+    if (email.includes("@")) {
+      const uid = String(row.uid || row.key || "").trim();
+      // Promote legacy 0… / bare keys to the single canonical 64… row.
+      if (uid && !isPoisonPassengerKey(uid)) {
+        void upsertPhoneIndex(db, digits, uid, email).catch(() => undefined);
+      }
+      return email.toLowerCase();
+    }
     const uid = String(row.uid || row.key || "").trim();
     if (uid && !isPoisonPassengerKey(uid) && !indexedUid) indexedUid = uid;
   }
@@ -69,6 +76,9 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
   // Scan users by phone when index is missing or poisoned.
   try {
     const candidateSet = new Set(phoneIndexCandidates(digits));
+    for (const c of phoneIndexCandidates(toCanonicalPhone(digits) || digits)) {
+      candidateSet.add(c);
+    }
     const usersSnap = await db.ref("users").once("value");
     if (usersSnap.exists()) {
       let foundEmail = "";
@@ -77,7 +87,8 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
         const u = child.val() as Record<string, unknown> | null;
         if (!u || typeof u !== "object") return;
         const phone = normalisePhone(String(u.phone ?? u.Phone ?? u.PhoneNo ?? ""));
-        if (!phone || !candidateSet.has(phone)) return;
+        if (!phone) return;
+        if (!candidateSet.has(phone) && !candidateSet.has(toCanonicalPhone(phone))) return;
         const email = String(u.email ?? "").trim();
         if (email.includes("@")) foundEmail = email.toLowerCase();
       });
@@ -87,7 +98,7 @@ async function resolveLoginEmail(identifier: string): Promise<string> {
     /* continue */
   }
 
-  return phoneAuthEmail(digits);
+  return phoneAuthEmail(toCanonicalPhone(digits) || digits);
 }
 
 async function identityToolkit(
@@ -209,12 +220,22 @@ passengerAuthRouter.post("/passenger-auth/login", async (req: Request, res: Resp
     const db = getDatabase();
     const profileSnap = await db.ref(`users/${uid}`).once("value");
     const profile = (profileSnap.val() || {}) as Record<string, unknown>;
+    const resolvedEmail = String(profile.email || email || "").trim().toLowerCase();
+    const profilePhone = String(profile.phone || "").trim();
+    // Rebuild canonical passengerIndex/phone on every successful login so
+    // legacy 0… rows converge to 64… without requiring re-registration.
+    const phoneForIndex =
+      profilePhone ||
+      (!looksLikeEmail(identifier) ? String(identifier) : "");
+    if (phoneForIndex && resolvedEmail.includes("@")) {
+      void upsertPhoneIndex(db, phoneForIndex, uid, resolvedEmail).catch(() => undefined);
+    }
     return res.json({
       ok: true,
       uid,
-      email: String(profile.email || email),
+      email: resolvedEmail,
       name: String(profile.name || signed.json.displayName || ""),
-      phone: String(profile.phone || ""),
+      phone: profilePhone,
       idToken: String(signed.json.idToken || ""),
       refreshToken: String(signed.json.refreshToken || ""),
     });
@@ -270,6 +291,70 @@ passengerAuthRouter.get("/passenger-auth/session", async (req: Request, res: Res
     });
   } catch {
     return res.status(401).json({ error: "Session expired — please sign in again." });
+  }
+});
+
+/**
+ * Admin-only: promote legacy phone-index rows to the single canonical 64… key.
+ * Body: { phones: string[] } e.g. ["0275683723","021304322"]
+ */
+passengerAuthRouter.post("/passenger-auth/heal-phone-index", async (req: Request, res: Response) => {
+  try {
+    const expected = process.env["BW_ADMIN_KEY"];
+    const provided = req.header("X-Admin-Key");
+    if (!expected || !provided || provided !== expected) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const phones = Array.isArray(req.body?.phones)
+      ? (req.body.phones as unknown[]).map((p) => String(p || "").trim()).filter(Boolean)
+      : [];
+    if (!phones.length) {
+      return res.status(400).json({ error: "phones: string[] required" });
+    }
+    const db = getDatabase();
+    const results: Array<Record<string, unknown>> = [];
+    for (const phone of phones) {
+      const canonical = toCanonicalPhone(phone);
+      let email = "";
+      let uid = "";
+      for (const c of phoneIndexCandidates(canonical || phone)) {
+        const snap = await db.ref(`passengerIndex/phone/${c}`).once("value");
+        const row = snap.val() as Record<string, unknown> | null;
+        if (!row) continue;
+        const rowEmail = String(row.email || "").trim();
+        const rowUid = String(row.uid || row.key || "").trim();
+        if (rowEmail.includes("@")) email = rowEmail.toLowerCase();
+        if (rowUid && !isPoisonPassengerKey(rowUid)) uid = rowUid;
+        if (email && uid) break;
+      }
+      if ((!email || !uid) && canonical) {
+        // Fall back: scan users for matching phone
+        const usersSnap = await db.ref("users").once("value");
+        const want = new Set(phoneIndexCandidates(canonical));
+        usersSnap.forEach((child: DataSnapshot) => {
+          if ((email && uid) || !child.key || isPoisonPassengerKey(child.key)) return;
+          const u = child.val() as Record<string, unknown> | null;
+          if (!u || typeof u !== "object") return;
+          const p = normalisePhone(String(u.phone ?? u.Phone ?? u.PhoneNo ?? ""));
+          if (!p || (!want.has(p) && !want.has(toCanonicalPhone(p)))) return;
+          const e = String(u.email || "").trim();
+          if (e.includes("@")) {
+            email = e.toLowerCase();
+            uid = child.key;
+          }
+        });
+      }
+      if (!email || !uid) {
+        results.push({ phone, canonical, ok: false, reason: "not_found" });
+        continue;
+      }
+      await upsertPhoneIndex(db, phone, uid, email);
+      results.push({ phone, canonical, uid: uid.slice(0, 10), emailDomain: email.split("@")[1], ok: true });
+    }
+    return res.json({ ok: true, results });
+  } catch (err: unknown) {
+    const e = err as Error;
+    return res.status(500).json({ error: e.message || "Heal failed" });
   }
 });
 
