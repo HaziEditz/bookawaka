@@ -25,8 +25,8 @@ import {
   Save,
   X,
   Eraser,
-  Wallet,
-} from "lucide-react";
+import { Wallet } from "lucide-react";
+import { bookingTimeCancelRules, selfServeCancelAllowed, SUPPORT_EMAIL } from "@/lib/cancelCopy";
 
 const DISMISSED_KEY = "bw_dismissed_rides";
 
@@ -520,7 +520,16 @@ function RideCard({
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const [cancelResult, setCancelResult] = useState<{ walletCredited: boolean; walletCreditAmount: number | null; driverAssigned: boolean } | null>(null);
+  const [cancelResult, setCancelResult] = useState<{
+    walletCredited: boolean;
+    walletCreditAmount: number | null;
+    driverAssigned: boolean;
+    passengerMessage?: string;
+    companyPhone?: string;
+    cashCancelWarning?: boolean;
+    cashCancelCardOnly?: boolean;
+  } | null>(null);
+  const [cancelQuote, setCancelQuote] = useState<{ detail?: string; companyPhone?: string } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -574,13 +583,9 @@ function RideCard({
   const isPendingPayment = statusLower === "pendingpayment" || statusLower === "paymentpending";
   const isScheduled = statusLower === "scheduled";
   const isPending = statusLower === "pending";
-  // Driver-on-the-way states: backend is authoritative on whether cancel is allowed
-  // (returns 409 if not). We still surface the button so user can try — backend rejects.
-  const isDriverActive = ["assigned", "accepted", "enroute", "ontrip", "started", "arrived"].includes(statusLower);
-  // "Offered" = dispatch surfaced the job to a driver but no one has accepted yet.
-  // Passenger may still cancel; backend allowlist mirrors this.
+  const isDriverActive = ["assigned", "accepted", "enroute", "picking", "queued"].includes(statusLower);
   const isOffered = ["offered", "offer", "offering"].includes(statusLower);
-  const isCancellable = isScheduled || isPending || isPendingPayment || isOffered || isDriverActive;
+  const isCancellable = selfServeCancelAllowed(ride.Status) && (isScheduled || isPending || isPendingPayment || isOffered || isDriverActive || ["waiting", "no one", "noone"].includes(statusLower));
   // Edits to address/time are blocked once a driver is involved — backend is source of truth.
   const isEditable = isScheduled || isPending;
   const isCardPaid = ride.paymentMethod === "card" && ride.paymentStatus === "paid";
@@ -663,7 +668,15 @@ function RideCard({
       );
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not cancel");
-      setCancelResult({ walletCredited: data.walletCredited, walletCreditAmount: data.walletCreditAmount, driverAssigned: data.driverAssigned });
+      setCancelResult({
+        walletCredited: data.walletCredited,
+        walletCreditAmount: data.walletCreditAmount,
+        driverAssigned: data.driverAssigned,
+        passengerMessage: data.passengerMessage || data.fairness?.passengerMessage,
+        companyPhone: data.companyPhone,
+        cashCancelWarning: data.cashCancelWarning === true,
+        cashCancelCardOnly: data.cashCancelCardOnly === true,
+      });
       // Move the ride into the Cancelled section so the user sees it land there
       onCancelled(ride.BookingId);
     } catch (err: any) {
@@ -810,21 +823,19 @@ function RideCard({
       {confirmCancel && (
         <div className="bg-destructive/5 border border-destructive/20 rounded-xl p-4 mb-3 space-y-3">
           <p className="text-sm font-bold text-destructive">Cancel this booking?</p>
-          {isCardPaid ? (
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              {isDriverActive
-                ? <>The driver is already on the way. Cancelling now will <strong>not</strong> add wallet credit and the fare stays charged to your card.</>
-                : ride.DriverId
-                  ? "A driver has been assigned but isn't on the way yet. Cancelling now will not add wallet credit."
-                  : <>No driver assigned yet — the fare will be added to your <strong>BookaWaka wallet</strong> as credit (linked to your phone). Use it on your next booking. <strong>No card refund.</strong></>}
-            </p>
-          ) : (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {cancelQuote?.detail || bookingTimeCancelRules(ride.paymentMethod || "cash", /tm/i.test(String(ride.paymentMethod || "")))}
+          </p>
+          {(cancelQuote?.companyPhone || true) && (
             <p className="text-xs text-muted-foreground">
-              {isDriverActive
-                ? "The driver is already on the way. You can still cancel, but please let the driver know if possible. No charge — cash bookings are always free to cancel."
-                : ride.DriverId
-                  ? "A driver has been assigned but isn't on the way yet. No charge — cash bookings are always free to cancel."
-                  : "This booking will be removed from the dispatch queue. No charge — cash bookings are always free to cancel."}
+              Need help?{" "}
+              {cancelQuote?.companyPhone ? (
+                <a href={`tel:${cancelQuote.companyPhone}`} className="font-bold underline inline-flex items-center gap-1">
+                  <Phone className="w-3 h-3" /> {cancelQuote.companyPhone}
+                </a>
+              ) : (
+                <>Email <a href={`mailto:${SUPPORT_EMAIL}`} className="font-bold underline">{SUPPORT_EMAIL}</a></>
+              )}
             </p>
           )}
           <div className="flex gap-2">
@@ -853,16 +864,22 @@ function RideCard({
       {cancelResult && (
         <div className={`flex items-start gap-2 text-xs rounded-xl px-3 py-2 mb-3 ${cancelResult.walletCredited ? "bg-emerald-50 border border-emerald-200 text-emerald-700" : "bg-muted border border-border text-muted-foreground"}`}>
           <Wallet className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-          {cancelResult.walletCredited
-            ? <span>
-                Booking cancelled. <strong>${cancelResult.walletCreditAmount?.toFixed(2)} NZD added to your wallet</strong> — use it on your next booking.
-                {" "}Need this refunded to your card instead? Email{" "}
-                <a href={`mailto:info@bookawaka.com?subject=Refund%20to%20card%20request%20-%20${encodeURIComponent(ride.BookingId)}`} className="font-bold underline hover:text-emerald-900">info@bookawaka.com</a>
-                {" "}with booking ID <span className="font-mono">{ride.BookingId}</span>.
-              </span>
-            : cancelResult.driverAssigned
-              ? <span>Booking cancelled. No wallet credit — a driver had already been assigned.</span>
-              : <span>Booking cancelled.</span>}
+          <span>
+            {cancelResult.passengerMessage
+              ? cancelResult.passengerMessage
+              : cancelResult.walletCredited
+                ? <>Booking cancelled. <strong>${cancelResult.walletCreditAmount?.toFixed(2)} NZD added to your wallet</strong> — use it on your next booking.</>
+                : <>Booking cancelled.</>}
+            {cancelResult.companyPhone && (
+              <> Call <a href={`tel:${cancelResult.companyPhone}`} className="font-bold underline">{cancelResult.companyPhone}</a>.</>
+            )}
+            {cancelResult.cashCancelWarning && !cancelResult.cashCancelCardOnly && (
+              <> This is your third cash cancellation in 30 days. Further cash cancellations will require card payment going forward.</>
+            )}
+            {cancelResult.cashCancelCardOnly && (
+              <> Future bookings from this account must be paid by card.</>
+            )}
+          </span>
         </div>
       )}
 
@@ -928,7 +945,21 @@ function RideCard({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setConfirmCancel(true)}
+              onClick={async () => {
+                setConfirmCancel(true);
+                try {
+                  const q = await fetch(
+                    `${import.meta.env.BASE_URL}api/my-rides/${ride.BookingId}/cancel-quote?companyId=${encodeURIComponent(ride.CompanyId)}`,
+                  );
+                  const data = await q.json();
+                  setCancelQuote({
+                    detail: String(data?.fairness?.confirmMessage || data.fairness?.detail || ""),
+                    companyPhone: String(data?.companyPhone || ""),
+                  });
+                } catch {
+                  setCancelQuote(null);
+                }
+              }}
               disabled={isCancelling}
               className="rounded-full text-destructive border-destructive/30 hover:bg-destructive/10 hover:border-destructive font-bold"
             >

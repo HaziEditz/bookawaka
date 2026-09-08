@@ -14,6 +14,7 @@ import BookingMapPanel from "@/components/BookingMapPanel";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
 import PhoneField from "@/components/PhoneField";
 import { getPassengerSession } from "@/lib/passengerKey";
+import { bookingTimeCancelRules, SUPPORT_EMAIL } from "@/lib/cancelCopy";
 import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
   Car,
@@ -56,6 +57,7 @@ interface Company {
   city?: string;
   country?: string;
   email?: string;
+  phone?: string;
   /** Free-text hours from companySettings when configured (often empty today). */
   operatingHours?: string;
   /** ASAP gate: company dispatch console online (activeDispatchers). */
@@ -104,6 +106,7 @@ function normalizeCompanies(raw: unknown): Company[] {
       city: c.city != null ? String(c.city) : undefined,
       country: c.country != null ? String(c.country) : undefined,
       email: c.email != null ? String(c.email) : undefined,
+      phone: c.phone != null ? String(c.phone) : undefined,
       operatingHours:
         c.operatingHours != null && String(c.operatingHours).trim()
           ? String(c.operatingHours).trim()
@@ -259,6 +262,7 @@ export default function BookPage() {
   const [paidByCard, setPaidByCard] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("card");
+  const [cardOnly, setCardOnly] = useState(false);
   const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Any");
   const [passengers, setPassengers] = useState(1);
   const [paymentRef, setPaymentRef] = useState("");
@@ -344,7 +348,10 @@ export default function BookPage() {
       if (res.ok) {
         const bal = typeof d.balance === "number" ? d.balance : 0;
         setWalletBalance(bal);
-        // Do NOT auto-enable wallet spend. Auto-on previously stuck true across
+        setCardOnly(d.cardOnly === true);
+        if (d.cardOnly === true && paymentMethod === "cash") {
+          setPaymentMethod("card");
+        }
         // Account/TM/Cash reviews and showed a fake "Wallet credit / Card due"
         // without ever debiting (wallet is card-checkout only).
       }
@@ -639,6 +646,7 @@ export default function BookPage() {
       return paymentConfig?.cardEnabled === true || paymentConfig == null;
     }
     if (pm.value === "cash") {
+      if (cardOnly) return false;
       return paymentConfig?.effectiveCash === true;
     }
     return true;
@@ -647,7 +655,7 @@ export default function BookPage() {
   /** TM remainder chips — Cash always included regardless of company cash toggle. */
   const tmRemainderMethods = PAYMENT_METHODS.filter((pm) => {
     if (pm.value === "tm") return false;
-    if (pm.value === "cash") return true;
+    if (pm.value === "cash") return !cardOnly;
     if (pm.value === "card") {
       return paymentConfig?.cardEnabled === true || paymentConfig == null;
     }
@@ -1709,9 +1717,14 @@ export default function BookPage() {
                     ))}
                   </div>
 
-                  {paymentMethod === "cash" && (
-                    <p className="text-xs text-muted-foreground">{PAYMENT_METHODS.find((m) => m.value === "cash")?.help}</p>
+                  {cardOnly && (
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                      This account is card-only after repeated cash cancellations.
+                    </p>
                   )}
+                  <p className="text-xs text-muted-foreground">
+                    {bookingTimeCancelRules(paymentMethod === "tm" ? tmRemainder : paymentMethod, paymentMethod === "tm")}
+                  </p>
 
                   {paymentMethod === "card" && (
                     <>
@@ -1725,7 +1738,7 @@ export default function BookPage() {
                       <div className="rounded-xl border border-amber-200/80 bg-amber-50/80 p-3 text-xs text-amber-950 flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
                         <span>
-                          Cancel before a driver is assigned and the fare goes to your BookaWaka wallet (phone-linked credit), not back to your card. No credit after a driver is assigned.
+                          Cancel any time until the driver arrives. Before assignment the fare is credited to your BookaWaka wallet (not back to your card). After assignment: 50% if the driver is still early; 100% if they are 60%+ of the way, arrived, or a no-show. Missing GPS is not free. Card refunds: {SUPPORT_EMAIL}.
                         </span>
                       </div>
                     </>
@@ -2328,7 +2341,12 @@ export default function BookPage() {
                 <div className="max-w-sm mx-auto mb-6 p-5 bg-destructive/5 border border-destructive/20 rounded-2xl text-left">
                   <p className="text-sm font-bold text-destructive mb-2">Cancel this booking?</p>
                   <p className="text-sm text-muted-foreground mb-4">
-                    This will cancel booking #{bookingId}. You can edit pickup or time instead if you only need to change details.
+                    This will cancel booking #{bookingId}. {bookingTimeCancelRules(paymentMethod === "tm" ? tmRemainder : paymentMethod, paymentMethod === "tm")}
+                    {selectedCompany?.phone ? (
+                      <> Call the company on <a className="font-bold underline" href={`tel:${selectedCompany.phone}`}>{selectedCompany.phone}</a>.</>
+                    ) : (
+                      <> Need help? Email {SUPPORT_EMAIL}.</>
+                    )}
                   </p>
                   {successCancelError && (
                     <p className="text-sm text-destructive mb-3">{successCancelError}</p>

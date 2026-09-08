@@ -65,6 +65,17 @@ companiesRouter.get("/companies", async (req, res) => {
           timezone: timezone.includes("/") ? timezone : "Pacific/Auckland",
           isScheduled: false,
         });
+        const phone = String(
+          v.phone ||
+            v.contactPhone ||
+            v.dispatchPhone ||
+            settings.phone ||
+            settings.contactPhone ||
+            settings.dispatchPhone ||
+            superClient.phone ||
+            superClient.contactPhone ||
+            "",
+        ).trim();
         return {
           id,
           name: v.name ?? settings.name ?? `Company ${id}`,
@@ -81,6 +92,7 @@ companiesRouter.get("/companies", async (req, res) => {
             superClient.email ||
             superClient.contactEmail ||
             "",
+          phone,
           operatingHours: typeof hours === "string" ? hours : "",
           timezone: timezone.includes("/") ? timezone : "",
           dispatchOnline,
@@ -136,6 +148,7 @@ companiesRouter.get("/public/companies", async (req, res) => {
           services: v.services ?? ["taxi"],
           city: v.city ?? "",
           country: v.country ?? "New Zealand",
+          phone: String(v.phone || v.contactPhone || settings.phone || settings.contactPhone || "").trim(),
           operatingHours: typeof hours === "string" ? hours : "",
           dispatchOnline,
           asapBookable: asap.allowed,

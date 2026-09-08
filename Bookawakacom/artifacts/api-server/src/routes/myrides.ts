@@ -1,13 +1,14 @@
 import { Router } from "express";
 import { getDatabase } from "../lib/firebase";
 import { cancelScheduledDispatch, registerScheduledDispatch } from "../lib/scheduler";
-import { creditWallet } from "../lib/wallet";
 import { resolvePassengerWalletKey } from "../lib/passengerKey";
 import { formatNzBookingDateTime } from "../lib/formatNzBookingDateTime";
 import {
   sendBookingCancelledEmails,
   sendBookingUpdatedEmails,
 } from "../lib/bookingNotifyEmails";
+import { selfServeCancelAllowed, SUPPORT_EMAIL } from "../lib/cancelCopy";
+import { forwardDispatchCancel, dispatchCancelQuote } from "../lib/dispatchCancel";
 
 const myRidesRouter = Router();
 
@@ -231,207 +232,68 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
     const booking = bookingSnap.val() as Record<string, any> | null;
     const currentStatus: string | null = booking?.Status ?? booking?.status ?? null;
 
-    const cancellable = [
-      "Scheduled", "scheduled",
-      "Pending", "pending",
-      "PendingPayment", "pendingpayment", "paymentpending",
-      // Dispatcher pool / waiting states — passenger still sees "Looking for driver".
-      "No One", "no one", "NoOne", "noone",
-      "Waiting", "waiting",
-      "Queued", "queued",
-      // "Offered" = dispatch presented the job to a driver; no driver has accepted yet,
-      // so passenger-initiated cancel is still allowed (same as Pending).
-      "Offered", "offered", "Offer", "offer", "Offering", "offering",
-    ];
-    if (currentStatus && !cancellable.includes(currentStatus)) {
+    if (currentStatus && !selfServeCancelAllowed(currentStatus)) {
       res.status(409).json({
-        error: `Cannot cancel a job with status "${currentStatus}". Contact the company directly.`,
+        error: `The driver has arrived — cancellation is no longer available. Contact the company or email ${SUPPORT_EMAIL}.`,
+        error_code: "self_serve_locked",
+        supportEmail: SUPPORT_EMAIL,
       });
       return;
     }
 
-    // --- Wallet credit logic (NO Stripe refund) ---
-    // Policy: card-paid cancellations are credited to the passenger's BookaWaka wallet,
-    // never refunded back to the card. Passenger sees a notice on /book before paying so
-    // they know this upfront. Wallet balance can be spent on future bookings.
-    // No credit is issued if a driver has already been assigned (consistent with the old
-    // "no refund after driver assigned" rule).
-    let walletCredited = false;
-    let walletCreditAmount: number | null = null;
-    let driverAssigned = false;
+    const cancelledAt = new Date().toISOString();
 
-    const paymentMethod: string | null = booking?.paymentMethod ?? null;
-    const paymentStatus: string | null = booking?.paymentStatus ?? null;
-    const fareRaw: string | number | null = booking?.Fare ?? booking?.fare ?? null;
-
-    if (paymentMethod === "card" && paymentStatus === "paid") {
-      const driverId = booking?.DriverId ?? booking?.driverId ?? booking?.assignedDriver ?? null;
-      driverAssigned = !!(driverId && String(driverId).trim() !== "");
-
-      if (!driverAssigned) {
-        const fareNum = typeof fareRaw === "number" ? fareRaw : parseFloat(String(fareRaw ?? ""));
-        if (Number.isFinite(fareNum) && fareNum > 0) {
-          const cents = Math.round(fareNum * 100);
-          const walletRef = db.ref(`passengerWallet/${key}`);
-          const entryRef = walletRef.child("entries").push();
-          const entryId = entryRef.key!;
-          const nowIso = new Date().toISOString();
-
-          // Atomic balance increment via transaction (cents to avoid float drift)
-          const txResult = await walletRef.child("balanceCents").transaction(
-            (current: number | null) => (typeof current === "number" ? current : 0) + cents
-          );
-          if (txResult.committed) {
-            const newBalanceCents = txResult.snapshot.val() as number;
-            await walletRef.update({
-              balance: +(newBalanceCents / 100).toFixed(2),
-              currency: "NZD",
-              updatedAt: nowIso,
-              [`entries/${entryId}`]: {
-                amount: +(cents / 100).toFixed(2),
-                amountCents: cents,
-                type: "credit",
-                reason: "cancellation",
-                jobId,
-                companyId,
-                createdAt: nowIso,
-              },
-            });
-            walletCredited = true;
-            walletCreditAmount = +(cents / 100).toFixed(2);
-            req.log.info(
-              { jobId, companyId, key, walletCreditAmount, newBalance: newBalanceCents / 100 },
-              "Wallet credit issued for cancellation"
-            );
-          } else {
-            req.log.error({ jobId, key }, "Wallet credit transaction failed — cancelling anyway");
-          }
-        } else {
-          req.log.warn({ jobId, fareRaw }, "Card-paid cancellation but Fare not parseable — no wallet credit");
-        }
-      }
-    } else if (paymentMethod === "wallet" && paymentStatus === "paid") {
-      const driverId = booking?.DriverId ?? booking?.driverId ?? booking?.assignedDriver ?? null;
-      driverAssigned = !!(driverId && String(driverId).trim() !== "");
-
-      if (!driverAssigned) {
-        const spentRaw =
-          booking?.walletAmountApplied ??
-          (typeof fareRaw === "number" ? fareRaw : parseFloat(String(fareRaw ?? "")));
-        const spentNum = typeof spentRaw === "number" ? spentRaw : parseFloat(String(spentRaw ?? ""));
-        if (Number.isFinite(spentNum) && spentNum > 0) {
-          const cents = Math.round(spentNum * 100);
-          const credit = await creditWallet(db, key, cents, {
-            reason: "cancellation",
-            jobId,
-            companyId,
-            note: "Wallet-paid booking cancelled before driver assigned",
-          });
-          if (credit.ok) {
-            walletCredited = true;
-            walletCreditAmount = +(cents / 100).toFixed(2);
-            req.log.info(
-              { jobId, companyId, key, walletCreditAmount },
-              "Wallet spend refunded for wallet-paid cancellation"
-            );
-          } else {
-            req.log.error({ jobId, key, err: credit.error }, "Wallet refund failed — cancelling anyway");
-          }
-        }
-      }
+    // Dispatch is the money + driver-notify source of truth (same fairness as
+    // passenger app and dispatcher Cancel). Wallet credit / account bill happen there.
+    const fwd = await forwardDispatchCancel({
+      bookingId: jobId,
+      companyId,
+      cancelledBy: "website",
+      reason: "Cancelled via My Rides (passenger)",
+    });
+    if (!fwd.ok) {
+      req.log.warn({ jobId, companyId, status: fwd.status, body: fwd.data }, "Dispatch /api/cancel failed");
+      res.status(fwd.status === 409 ? 409 : fwd.status >= 400 ? fwd.status : 502).json({
+        error: fwd.error || "Could not cancel this booking",
+        error_code: fwd.data.error_code,
+        companyPhone: fwd.data.companyPhone,
+        supportEmail: fwd.data.supportEmail || SUPPORT_EMAIL,
+        fairness: fwd.data.fairness,
+      });
+      return;
     }
 
-    const cancelledAt = new Date().toISOString();
-    const updates: Record<string, any> = {};
+    const fairness = (fwd.data.fairness && typeof fwd.data.fairness === "object"
+      ? (fwd.data.fairness as Record<string, unknown>)
+      : null);
+    const walletCredited = fwd.data.walletCredited === true || Number(fwd.data.walletCreditAmount) > 0;
+    const walletCreditAmount =
+      typeof fwd.data.walletCreditAmount === "number"
+        ? fwd.data.walletCreditAmount
+        : Number(fairness?.creditAmount) || null;
+    const passengerMessage = String(
+      (fairness && fairness.passengerMessage) || fwd.data.passengerMessage || "",
+    );
 
     const cancelFields: Record<string, any> = {
       Status: "Cancelled",
       status: "Cancelled",
       CancelledAt: cancelledAt,
       CancelledBy: "passenger",
+      ...(fairness ? { cancelFairness: fairness, cancelPassengerMessage: passengerMessage } : {}),
       ...(walletCredited ? { refundStatus: "wallet_credited", walletCreditAmount } : {}),
-      ...(driverAssigned && (paymentMethod === "card" || paymentMethod === "wallet")
-        ? { refundStatus: "not_credited_driver_assigned" }
-        : {}),
     };
 
-    // Write cancellation fields to allbookings and Passengerjobs
+    const updates: Record<string, any> = {};
     for (const [field, value] of Object.entries(cancelFields)) {
       updates[`allbookings/${companyId}/${jobId}/${field}`] = value;
       updates[`Passengerjobs/${key}/${jobId}/${field}`] = value;
-    }
-
-    // Alert the dispatcher by writing Status: "Cancelled" to pendingjobs — the SA
-    // dispatch system listens to pendingjobs in real-time and will surface the
-    // cancellation to the dispatcher/driver immediately.
-    // If there was no pendingjobs entry (e.g. payment was never confirmed), this
-    // write is a no-op from the dispatcher's perspective — Firebase ignores writes
-    // to paths that don't affect existing listeners.
-    for (const [field, value] of Object.entries(cancelFields)) {
       updates[`pendingjobs/${companyId}/${jobId}/${field}`] = value;
     }
-
     await db.ref().update(updates);
 
-    // Cancel any pending auto-dispatch timer for this booking (safe no-op if none exists)
     cancelScheduledDispatch(companyId, jobId);
 
-    // Critical: Firebase Cancelled alone does not close Dispatch jobStore — zombies
-    // stay Pending/Offered and get re-offered (#8692608312 half-cancel). Always
-    // forward to Dispatch unified /api/cancel so allbookings/pendingjobs/jobStore
-    // close together (Website, Passenger App wallet path, any source).
-    let dispatchCancel: { ok?: boolean; error?: string; status?: number } | null = null;
-    try {
-      const dispatchBase = (
-        process.env["DISPATCH_API_URL"] ||
-        process.env["DISPATCH_SERVER_URL"] ||
-        "https://invt-production.up.railway.app"
-      ).replace(/\/+$/, "");
-      const adminKey = process.env["BW_ADMIN_KEY"];
-      if (!adminKey) {
-        req.log.error({ jobId, companyId }, "BW_ADMIN_KEY missing — cannot forward cancel to Dispatch");
-        dispatchCancel = { ok: false, error: "BW_ADMIN_KEY not configured" };
-      } else {
-        const upstream = await fetch(`${dispatchBase}/api/cancel`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Admin-Key": adminKey,
-          },
-          body: JSON.stringify({
-            bookingId: Number(jobId) || jobId,
-            companyId,
-            cancelledBy: "website",
-            reason: "Cancelled via My Rides (passenger)",
-          }),
-        });
-        const text = await upstream.text();
-        let data: Record<string, unknown> = {};
-        try {
-          data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-        } catch {
-          data = { ok: false, error: text || upstream.statusText };
-        }
-        dispatchCancel = {
-          ok: upstream.ok && data.ok !== false,
-          error: typeof data.error === "string" ? data.error : undefined,
-          status: upstream.status,
-        };
-        if (!dispatchCancel.ok) {
-          req.log.warn(
-            { jobId, companyId, status: upstream.status, body: data },
-            "Dispatch /api/cancel forward failed after Passengerjobs cancel",
-          );
-        } else {
-          req.log.info({ jobId, companyId }, "Cancel forwarded to Dispatch /api/cancel");
-        }
-      }
-    } catch (fwdErr: any) {
-      dispatchCancel = { ok: false, error: fwdErr?.message || String(fwdErr) };
-      req.log.warn({ err: fwdErr, jobId, companyId }, "Dispatch cancel forward threw");
-    }
-
-    // Email company + passenger on cancellation (fire-and-forget).
     const cancelledBooking = { ...(booking || {}), ...cancelFields, BookingId: booking?.BookingId ?? jobId };
     sendBookingCancelledEmails({
       booking: cancelledBooking,
@@ -443,20 +305,42 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
     }).catch((e) => req.log.warn({ e, jobId }, "Cancel emails failed"));
 
     req.log.info(
-      { jobId, companyId, key, walletCredited, driverAssigned, dispatchCancel },
-      "Job cancelled — Passengerjobs + Dispatch cancel attempted",
+      { jobId, companyId, key, walletCredited, fairnessOutcome: fairness?.outcome },
+      "Job cancelled via Dispatch fairness",
     );
     res.json({
       ok: true,
       walletCredited,
       walletCreditAmount,
-      driverAssigned,
-      dispatchCancel,
+      driverAssigned: String(fairness?.stage || "") !== "not_assigned",
+      fairness,
+      passengerMessage,
+      companyPhone: fwd.data.companyPhone,
+      supportEmail: fwd.data.supportEmail || SUPPORT_EMAIL,
+      cashCancelWarning: fwd.data.cashCancelWarning === true,
+      cashCancelCardOnly: fwd.data.cashCancelCardOnly === true,
+      dispatchCancel: { ok: true },
     });
+    return;
   } catch (err: any) {
     req.log.error({ err }, "POST /my-rides/:jobId/cancel error");
     res.status(500).json({ error: err.message });
   }
+});
+
+myRidesRouter.get("/my-rides/:jobId/cancel-quote", async (req, res) => {
+  const { jobId } = req.params;
+  const { companyId } = req.query as { companyId?: string };
+  if (!companyId) {
+    res.status(400).json({ error: "companyId is required" });
+    return;
+  }
+  const quote = await dispatchCancelQuote({ bookingId: jobId, companyId });
+  if (!quote) {
+    res.status(502).json({ error: "Could not load cancel quote" });
+    return;
+  }
+  res.json(quote);
 });
 
 myRidesRouter.post("/my-rides/:jobId/update", async (req, res) => {
@@ -694,8 +578,18 @@ myRidesRouter.get("/wallet", async (req, res) => {
       .map(([id, e]) => ({ id, ...(e as Record<string, any>) }) as Record<string, any>)
       .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
 
+    const abuseSnap = await db.ref(`passengerCancelAbuse/${resolvedKey}`).once("value");
+    const abuse = (abuseSnap.val() ?? {}) as Record<string, any>;
     res.setHeader("Cache-Control", "no-store");
-    res.json({ balance, currency: data.currency ?? "NZD", entries, passengerKey: resolvedKey });
+    res.json({
+      balance,
+      currency: data.currency ?? "NZD",
+      entries,
+      passengerKey: resolvedKey,
+      cardOnly: abuse.cardOnly === true,
+      cashCancelWarning: abuse.warning === true || (Array.isArray(abuse.cashCancels) && abuse.cashCancels.length >= 3),
+      cashCancelCount: Array.isArray(abuse.cashCancels) ? abuse.cashCancels.length : 0,
+    });
   } catch (err: any) {
     req.log.error({ err }, "GET /wallet error");
     res.status(500).json({ error: err.message });

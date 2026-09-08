@@ -10,6 +10,8 @@ import {
   sendBookingCancelledEmails,
 } from "../lib/bookingNotifyEmails";
 import { upsertPhoneIndex } from "../lib/passengerKey";
+import { selfServeCancelAllowed, SUPPORT_EMAIL } from "../lib/cancelCopy";
+import { forwardDispatchCancel } from "../lib/dispatchCancel";
 
 const bookingRouter = Router();
 
@@ -226,6 +228,77 @@ bookingRouter.post("/booking/cancel", async (req: Request, res: Response) => {
     if (abortMode && (pay === "paid" || pay === "confirmed")) {
       req.log.info({ companyId, jobId, pay }, "booking/cancel abort refused — already paid");
       res.json({ success: true, skipped: true, reason: "already_paid" });
+      return;
+    }
+
+    const liveStatus = String(existing.Status ?? existing.status ?? existing.BookingStatus ?? "");
+    if (!abortMode && liveStatus && !selfServeCancelAllowed(liveStatus)) {
+      res.status(409).json({
+        error: `The driver has arrived — cancellation is no longer available. Contact the company or email ${SUPPORT_EMAIL}.`,
+        error_code: "self_serve_locked",
+        supportEmail: SUPPORT_EMAIL,
+      });
+      return;
+    }
+
+    if (!abortMode) {
+      const fwd = await forwardDispatchCancel({
+        bookingId: jobId,
+        companyId,
+        cancelledBy: "passenger",
+        reason: "Cancelled via passenger app",
+      });
+      if (!fwd.ok) {
+        req.log.warn({ companyId, jobId, status: fwd.status, body: fwd.data }, "passenger cancel INVT failed");
+        res.status(fwd.status === 409 ? 409 : fwd.status >= 400 ? fwd.status : 502).json({
+          error: fwd.error || "Could not cancel this booking",
+          error_code: fwd.data.error_code,
+          companyPhone: fwd.data.companyPhone,
+          supportEmail: fwd.data.supportEmail || SUPPORT_EMAIL,
+          fairness: fwd.data.fairness,
+        });
+        return;
+      }
+      const fairness = fwd.data.fairness && typeof fwd.data.fairness === "object"
+        ? (fwd.data.fairness as Record<string, unknown>)
+        : null;
+      const nowIso = new Date().toISOString();
+      const paxPatch = {
+        Status: "Cancelled",
+        status: "Cancelled",
+        BookingStatus: "Cancelled",
+        CancelledAt: nowIso,
+        CancelledBy: "passenger",
+        cancelPassengerMessage: (fairness && fairness.passengerMessage) || "",
+        ...(fairness ? { cancelFairness: fairness } : {}),
+      };
+      await db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(paxPatch).catch(() => undefined);
+
+      const merged: Record<string, unknown> = { ...existing, ...paxPatch };
+      if (isScheduledBooking(merged)) {
+        const passengerEmail =
+          String(merged.PassengerEmail ?? merged.passengerEmail ?? merged.Email ?? "").trim() || undefined;
+        sendBookingCancelledEmails({
+          booking: bookingEmailPayload(merged, jobId),
+          companyId,
+          companyName: String(merged.CompanyName ?? merged.companyName ?? "").trim() || undefined,
+          companyEmail: String(merged.CompanyEmail ?? merged.companyEmail ?? "").trim() || undefined,
+          passengerEmail,
+          log: req.log,
+        }).catch((e) => req.log.warn({ err: e, jobId }, "booking cancel emails failed"));
+      }
+
+      res.json({
+        success: true,
+        fairness,
+        passengerMessage: fairness?.passengerMessage,
+        companyPhone: fwd.data.companyPhone,
+        supportEmail: fwd.data.supportEmail || SUPPORT_EMAIL,
+        walletCredited: fwd.data.walletCredited === true,
+        walletCreditAmount: fwd.data.walletCreditAmount,
+        cashCancelWarning: fwd.data.cashCancelWarning === true,
+        cashCancelCardOnly: fwd.data.cashCancelCardOnly === true,
+      });
       return;
     }
 
