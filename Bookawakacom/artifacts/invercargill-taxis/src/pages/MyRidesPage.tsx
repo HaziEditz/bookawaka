@@ -25,7 +25,8 @@ import {
   Save,
   X,
   Eraser,
-import { Wallet } from "lucide-react";
+  Wallet,
+} from "lucide-react";
 import { bookingTimeCancelRules, selfServeCancelAllowed, SUPPORT_EMAIL } from "@/lib/cancelCopy";
 
 const DISMISSED_KEY = "bw_dismissed_rides";
