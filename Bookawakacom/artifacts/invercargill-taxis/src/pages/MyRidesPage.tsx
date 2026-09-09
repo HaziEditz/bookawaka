@@ -233,6 +233,18 @@ export default function MyRidesPage() {
     return () => clearInterval(interval);
   }, [rides, passengerKey]);
 
+  useEffect(() => {
+    const liveActiveStatuses = new Set([
+      "scheduled", "pending", "assigned", "accepted", "picking",
+      "enroute", "en route", "ontrip", "on trip", "started", "arrived", "reassigned",
+    ]);
+    const live = rides.some((r) => liveActiveStatuses.has((r.Status ?? "").toLowerCase()));
+    document.documentElement.dataset.liveTripTracking = live ? "1" : "";
+    return () => {
+      document.documentElement.dataset.liveTripTracking = "";
+    };
+  }, [rides]);
+
   const handleLookup = async (e: React.FormEvent) => {
     e.preventDefault();
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");

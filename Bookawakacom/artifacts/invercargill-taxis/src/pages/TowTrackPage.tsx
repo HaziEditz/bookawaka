@@ -13,6 +13,13 @@ export default function TowTrackPage() {
   const jobRef = useRef<any>(null);
 
   useEffect(() => {
+    document.documentElement.dataset.liveTripTracking = jobId ? "1" : "";
+    return () => {
+      document.documentElement.dataset.liveTripTracking = "";
+    };
+  }, [jobId]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get("id");
     if (id) {

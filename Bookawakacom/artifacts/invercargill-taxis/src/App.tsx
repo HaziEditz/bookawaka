@@ -34,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { getPassengerSession } from "@/lib/passengerKey";
+import IdleSessionGuard from "@/components/IdleSessionGuard";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import NotFound from "@/pages/not-found";
 import BookPage from "@/pages/BookPage";
@@ -1111,6 +1112,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+          <IdleSessionGuard />
           <Router />
         </WouterRouter>
         <Toaster />
