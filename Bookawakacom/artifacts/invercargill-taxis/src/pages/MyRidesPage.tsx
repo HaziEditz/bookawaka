@@ -46,6 +46,65 @@ function saveDismissedIds(ids: Set<string>) {
   localStorage.setItem(DISMISSED_KEY, JSON.stringify(Array.from(ids)));
 }
 
+function stopLabelsFromRide(ride: Ride): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (address: string) => {
+    const a = String(address || "").trim();
+    if (!a || a === "[object Object]" || seen.has(a)) return;
+    seen.add(a);
+    out.push(a);
+  };
+  const tryList = (raw: unknown) => {
+    if (raw == null || raw === "") return;
+    let list: unknown = raw;
+    if (typeof raw === "string") {
+      const s = raw.trim();
+      if (!s) return;
+      if (s.startsWith("[") || s.startsWith("{")) {
+        try {
+          list = JSON.parse(s);
+        } catch {
+          if (s.includes("@") && /address=/i.test(s)) {
+            for (const part of s.split("|")) {
+              const m = part.match(/address=([^|]*)/i);
+              if (m) push(m[1]);
+            }
+            return;
+          }
+          push(s);
+          return;
+        }
+      } else if (s.includes("@") && /address=/i.test(s)) {
+        for (const part of s.split("|")) {
+          const m = part.match(/address=([^|]*)/i);
+          if (m) push(m[1]);
+        }
+        return;
+      } else {
+        push(s);
+        return;
+      }
+    }
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        if (item == null) continue;
+        if (typeof item === "string") {
+          push(item);
+          continue;
+        }
+        if (typeof item === "object") {
+          const o = item as Record<string, unknown>;
+          push(String(o.address ?? o.Address ?? ""));
+        }
+      }
+    }
+  };
+  tryList(ride.Stops ?? ride.stops);
+  tryList(ride.nextstopdata ?? ride.Nextstopdata);
+  return out;
+}
+
 interface Ride {
   BookingId: string;
   CompanyId: string;
@@ -69,6 +128,10 @@ interface Ride {
   paymentStatus?: string;
   Fare?: string;
   DriverId?: string;
+  Stops?: unknown;
+  stops?: unknown;
+  nextstopdata?: unknown;
+  Nextstopdata?: unknown;
 }
 
 const SERVICE_ICONS: Record<string, React.ReactNode> = {
@@ -737,6 +800,12 @@ function RideCard({
             <MapPin className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-emerald-600" />
             <span>{ride.PickAddress}</span>
           </div>
+          {stopLabelsFromRide(ride).map((stop, i, all) => (
+            <div key={`stop-${i}`} className="flex items-start gap-2 text-muted-foreground">
+              <MapPin className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
+              <span>{all.length === 1 ? "Via: " : `Stop ${i + 1}: `}{stop}</span>
+            </div>
+          ))}
           <div className="flex items-start gap-2 text-muted-foreground">
             <MapPin className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-destructive" />
             <span>{ride.DropAddress}</span>

@@ -38,7 +38,7 @@ export function NzDateTimeInput({
   };
 
   return (
-    <div className={cn("flex gap-2 items-stretch", className)}>
+    <div className={cn("flex flex-col gap-2 sm:flex-row sm:items-stretch", className)}>
       <Input
         ref={inputRef}
         id={id}
@@ -53,13 +53,13 @@ export function NzDateTimeInput({
           // Delay so Done click can run before focus clears.
           window.setTimeout(() => setFocused(false), 150);
         }}
-        className={cn("rounded-xl h-11 flex-1", inputClassName)}
+        className={cn("rounded-xl h-11 min-w-0 w-full sm:flex-1", inputClassName)}
       />
       <Button
         type="button"
         variant={focused || value ? "default" : "outline"}
         onClick={confirm}
-        className="rounded-xl h-11 px-4 font-bold shrink-0"
+        className="rounded-xl h-11 px-4 font-bold w-full sm:w-auto sm:shrink-0"
         aria-label="Confirm date and time"
       >
         <Check className="w-4 h-4 mr-1.5" />

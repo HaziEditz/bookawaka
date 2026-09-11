@@ -56,6 +56,30 @@ function isSparsePendingjobsRemnant(pj: Record<string, any>): boolean {
   return keys.length > 0 && keys.every((k) => allowedSparse.has(k));
 }
 
+function stopsPayloadNonEmpty(raw: unknown): boolean {
+  if (raw == null || raw === "") return false;
+  if (Array.isArray(raw)) return raw.length > 0;
+  if (typeof raw === "string") return raw.trim().length > 0;
+  if (typeof raw === "object") return Object.keys(raw as object).length > 0;
+  return false;
+}
+
+/** Prefer live allbookings stops; keep Passengerjobs if HQ row has none. */
+function overlayStops(live: Record<string, any>, _pax: Record<string, any>): Record<string, unknown> {
+  const liveHas =
+    stopsPayloadNonEmpty(live.Stops) ||
+    stopsPayloadNonEmpty(live.stops) ||
+    stopsPayloadNonEmpty(live.nextstopdata) ||
+    stopsPayloadNonEmpty(live.Nextstopdata);
+  if (!liveHas) return {};
+  return {
+    ...(live.Stops != null ? { Stops: live.Stops } : {}),
+    ...(live.stops != null ? { stops: live.stops } : {}),
+    ...(live.nextstopdata != null ? { nextstopdata: live.nextstopdata } : {}),
+    ...(live.Nextstopdata != null ? { Nextstopdata: live.Nextstopdata } : {}),
+  };
+}
+
 function scheduledMsOf(booking: Record<string, any>): number {
   const raw = booking.ScheduledForMs ?? booking.ScheduledFor;
   if (raw == null || raw === 0 || raw === "0") return 0;
@@ -176,6 +200,7 @@ myRidesRouter.get("/my-rides", async (req, res) => {
           ...(live.Pickingtime ? { Pickingtime: live.Pickingtime } : {}),
           ...(live.ScheduledFor != null ? { ScheduledFor: live.ScheduledFor } : {}),
           ...(live.ScheduledForMs != null ? { ScheduledForMs: live.ScheduledForMs } : {}),
+          ...overlayStops(live, r),
         };
       } catch (e) {
         req.log.warn({ e, cid, bid }, "my-rides: allbookings overlay read failed/timed out");

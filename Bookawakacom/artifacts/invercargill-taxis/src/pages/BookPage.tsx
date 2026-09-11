@@ -1619,7 +1619,7 @@ export default function BookPage() {
                         value={form.scheduledFor}
                         onChange={(val) => setForm((p) => ({ ...p, scheduledFor: val }))}
                         required={bookingType === "scheduled"}
-                        min={new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 16)}
+                        min={toNZDatetimeLocal(Date.now() + 5 * 60 * 1000)}
                       />
                       <p className="text-xs text-muted-foreground">At least 5 minutes from now. Tap Done to confirm the time.</p>
                     </div>

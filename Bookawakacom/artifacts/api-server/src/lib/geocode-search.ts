@@ -9,6 +9,13 @@
  *    is set we prefer LocationIQ (OSM-compatible free tier) for search.
  */
 
+import {
+  finalizeGeocodeHits,
+  parseTypedNzAddress,
+  streetOnlyQuery,
+  typedHouseUnresolved,
+} from "./geocode-rank";
+
 const NOMINATIM_TIMEOUT_MS = 8000;
 const LOCATIONIQ_TIMEOUT_MS = 8000;
 const DEFAULT_VIEWBOX = "167,-47,170,-45"; // Invercargill area bias
@@ -347,44 +354,74 @@ export async function searchNzPlaces(
 
   const provider = preferredProvider();
   const liqKey = locationIqKey();
-
-  if (provider === "locationiq" && liqKey) {
-    const primary = await locationIqSearch(trimmed, searchOpts, liqKey);
-    const hasNzHint = /\b(new zealand|nz)\b/i.test(trimmed);
-    const looksLikePlaceName = !/^\d+\s/.test(trimmed);
-    if (looksLikePlaceName && !hasNzHint && primary.length === 0) {
-      const boosted = await locationIqSearch(`${trimmed}, New Zealand`, searchOpts, liqKey);
-      return mergeHits(primary, boosted, limit);
-    }
-    return primary.slice(0, limit);
-  }
-
-  if (provider === "photon" || provider === "locationiq") {
-    // locationiq without key falls through to photon
-    try {
-      const hits = await photonSearch(trimmed, { limit });
-      if (hits.length > 0) return hits.slice(0, limit);
-      // Empty is a real miss — try NZ-suffixed once from cache-friendly path
-      if (!/\b(new zealand|nz)\b/i.test(trimmed) && !/^\d+\s/.test(trimmed)) {
-        const boosted = await photonSearch(`${trimmed}, New Zealand`, { limit });
-        return boosted.slice(0, limit);
-      }
-      return hits;
-    } catch (err) {
-      // Fall through to throttled Nominatim only if Photon is down
-      if (!(err instanceof GeocodeUpstreamError)) throw err;
-    }
-  }
-
-  // Nominatim path — throttled + cached (policy: no autocomplete, but used as last-resort fallback).
-  const primary = await nominatimSearch(trimmed, searchOpts);
   const hasNzHint = /\b(new zealand|nz)\b/i.test(trimmed);
-  const looksLikePlaceName = !/^\d+\s/.test(trimmed);
-  if (looksLikePlaceName && !hasNzHint && primary.length === 0) {
-    const boosted = await nominatimSearch(`${trimmed}, New Zealand`, searchOpts);
-    return mergeHits(primary, boosted, limit);
+  const looksLikePlaceName = !/^\d/.test(trimmed);
+
+  const safePhoton = async (q: string): Promise<NominatimHit[]> => {
+    try {
+      return await photonSearch(q, { limit });
+    } catch (err) {
+      if (!(err instanceof GeocodeUpstreamError)) throw err;
+      return [];
+    }
+  };
+  const safeNom = async (q: string): Promise<NominatimHit[]> => {
+    try {
+      return await nominatimSearch(q, searchOpts);
+    } catch (err) {
+      if (!(err instanceof GeocodeUpstreamError)) throw err;
+      return [];
+    }
+  };
+  const safeLiq = async (q: string): Promise<NominatimHit[]> => {
+    if (!liqKey) return [];
+    try {
+      return await locationIqSearch(q, searchOpts, liqKey);
+    } catch (err) {
+      if (!(err instanceof GeocodeUpstreamError)) throw err;
+      return [];
+    }
+  };
+
+  let hits: NominatimHit[] = [];
+
+  // LocationIQ empty used to return immediately with no Photon/Nominatim fallback
+  // ("No matching addresses found" for real NZ streets). Always fall through.
+  if (provider === "locationiq" && liqKey) {
+    hits = await safeLiq(trimmed);
+    if (hits.length === 0 && looksLikePlaceName && !hasNzHint) {
+      hits = mergeHits(hits, await safeLiq(`${trimmed}, New Zealand`), limit * 2);
+    }
   }
-  return primary.slice(0, limit);
+
+  if ((hits.length === 0 || typedHouseUnresolved(trimmed, hits)) && provider !== "nominatim") {
+    let photonHits = await safePhoton(trimmed);
+    if (photonHits.length === 0 && looksLikePlaceName && !hasNzHint) {
+      photonHits = await safePhoton(`${trimmed}, New Zealand`);
+    }
+    hits = mergeHits(hits, photonHits, limit * 2);
+  }
+
+  if (hits.length === 0 || typedHouseUnresolved(trimmed, hits)) {
+    let nomHits = await safeNom(trimmed);
+    if (nomHits.length === 0 && looksLikePlaceName && !hasNzHint) {
+      nomHits = await safeNom(`${trimmed}, New Zealand`);
+    }
+    hits = mergeHits(hits, nomHits, limit * 2);
+  }
+
+  // OSM often lacks the typed house number. Use the street centroid so the
+  // passenger can still select the address they typed instead of "not found".
+  if (typedHouseUnresolved(trimmed, hits) || hits.length === 0) {
+    const streetQ = streetOnlyQuery(parseTypedNzAddress(trimmed));
+    if (streetQ) {
+      let donors = provider === "nominatim" ? [] : await safePhoton(streetQ);
+      if (!donors.length) donors = await safeNom(streetQ);
+      hits = mergeHits(hits, donors, limit * 2);
+    }
+  }
+
+  return finalizeGeocodeHits(trimmed, hits, limit);
 }
 
 export function geocodeProviderLabel(): string {
