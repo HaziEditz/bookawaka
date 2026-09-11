@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getDatabase } from "../lib/firebase";
 import { cancelScheduledDispatch, registerScheduledDispatch } from "../lib/scheduler";
-import { resolvePassengerWalletKey } from "../lib/passengerKey";
+import { collectPassengerJobKeys, collectPassengerJobKeysFromBooking, resolvePassengerWalletKey } from "../lib/passengerKey";
 import { formatNzBookingDateTime } from "../lib/formatNzBookingDateTime";
 import {
   sendBookingCancelledEmails,
@@ -136,12 +136,30 @@ myRidesRouter.get("/my-rides", async (req, res) => {
       return;
     }
 
-    const snap = (await withTimeout(
-      db.ref(`Passengerjobs/${resolvedKey}`).once("value"),
-      10_000,
-      `Passengerjobs/${resolvedKey}`,
-    )) as { val: () => unknown };
-    const data = (snap.val() ?? {}) as Record<string, unknown>;
+    const treeKeys = await collectPassengerJobKeys(db, {
+      uid: resolvedKey,
+      phone,
+      email,
+      extra: [key],
+    });
+    const data: Record<string, unknown> = {};
+    await Promise.all(
+      treeKeys.map(async (treeKey) => {
+        try {
+          const snap = (await withTimeout(
+            db.ref(`Passengerjobs/${treeKey}`).once("value"),
+            10_000,
+            `Passengerjobs/${treeKey}`,
+          )) as { val: () => unknown };
+          const tree = (snap.val() ?? {}) as Record<string, unknown>;
+          for (const [id, job] of Object.entries(tree)) {
+            if (job && typeof job === "object" && data[id] == null) data[id] = job;
+          }
+        } catch {
+          /* one alias tree must not fail My Rides */
+        }
+      }),
+    );
     const rides = Object.values(data) as any[];
 
     // Authoritative-status overlay. Passengerjobs is the per-passenger index, but
@@ -309,11 +327,14 @@ myRidesRouter.post("/my-rides/:jobId/cancel", async (req, res) => {
       ...(walletCredited ? { refundStatus: "wallet_credited", walletCreditAmount } : {}),
     };
 
+    const paxTrees = await collectPassengerJobKeysFromBooking(db, booking, [key]);
     const updates: Record<string, any> = {};
     for (const [field, value] of Object.entries(cancelFields)) {
       updates[`allbookings/${companyId}/${jobId}/${field}`] = value;
-      updates[`Passengerjobs/${key}/${jobId}/${field}`] = value;
       updates[`pendingjobs/${companyId}/${jobId}/${field}`] = value;
+      for (const treeKey of paxTrees) {
+        updates[`Passengerjobs/${treeKey}/${jobId}/${field}`] = value;
+      }
     }
     await db.ref().update(updates);
 
@@ -456,8 +477,11 @@ myRidesRouter.post("/my-rides/:jobId/update", async (req, res) => {
 
     if (pickAddress) {
       const next = String(pickAddress).trim();
-      if (next && next !== String(booking.PickAddress ?? "").trim()) {
+      if (next && next !== String(booking.PickAddress ?? booking.PickupAddress ?? "").trim()) {
         content.PickAddress = next;
+        content.pickAddress = next;
+        content.PickupAddress = next;
+        content.pickupAddress = next;
         content.pickupLocation = {
           ...(typeof booking.pickupLocation === "object" && booking.pickupLocation
             ? booking.pickupLocation
@@ -470,8 +494,11 @@ myRidesRouter.post("/my-rides/:jobId/update", async (req, res) => {
 
     if (dropAddress) {
       const next = String(dropAddress).trim();
-      if (next && next !== String(booking.DropAddress ?? "").trim()) {
+      if (next && next !== String(booking.DropAddress ?? booking.DropoffAddress ?? "").trim()) {
         content.DropAddress = next;
+        content.dropAddress = next;
+        content.DropoffAddress = next;
+        content.dropoffAddress = next;
         content.dropoffLocation = {
           ...(typeof booking.dropoffLocation === "object" && booking.dropoffLocation
             ? booking.dropoffLocation
@@ -488,10 +515,11 @@ myRidesRouter.post("/my-rides/:jobId/update", async (req, res) => {
       return;
     }
 
+    const paxTrees = await collectPassengerJobKeysFromBooking(db, booking, [key]);
     const updates: Record<string, any> = {};
     const writePaths = [
       `allbookings/${companyId}/${jobId}`,
-      `Passengerjobs/${key}/${jobId}`,
+      ...paxTrees.map((treeKey) => `Passengerjobs/${treeKey}/${jobId}`),
     ];
 
     // pendingjobs: full content sync only when a real dispatch row already exists.

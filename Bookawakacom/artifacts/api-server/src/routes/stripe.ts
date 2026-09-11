@@ -9,6 +9,7 @@ import {
 } from "../lib/stripe-commission";
 import { registerScheduledDispatch } from "../lib/scheduler";
 import { sendBookingCreatedEmails } from "../lib/bookingNotifyEmails";
+import { collectPassengerJobKeysFromBooking } from "../lib/passengerKey";
 
 const stripeRouter = Router();
 
@@ -420,11 +421,8 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
       ]) {
         if (k && String(k).trim()) paxKeys.add(String(k).trim());
       }
-      const phone = String(existing.PassengerPhone ?? existing.passengerPhone ?? "").replace(/[^0-9]/g, "");
-      if (phone.length >= 8) {
-        const idx = (await db.ref(`passengerIndex/phone/${phone}`).once("value")).val();
-        if (idx?.key) paxKeys.add(String(idx.key));
-        if (idx?.uid) paxKeys.add(String(idx.uid));
+      for (const k of await collectPassengerJobKeysFromBooking(db, existing)) {
+        paxKeys.add(k);
       }
 
       const writes: Promise<any>[] = [
@@ -614,13 +612,8 @@ stripeRouter.post("/stripe/verify-and-dispatch", async (req, res) => {
     const walletHint = String(existing.passengerKey ?? existing.PassengerKey ?? "").trim();
     if (walletHint) paxKeys.add(walletHint);
 
-    const rawPhone: string | null = existing.PassengerPhone ?? existing.passengerPhone ?? null;
-    if (rawPhone) {
-      const normalizedPhone = rawPhone.replace(/[^0-9]/g, "");
-      const pkSnap = await db.ref(`passengerIndex/phone/${normalizedPhone}`).once("value");
-      const idx = pkSnap.val();
-      if (idx?.key) paxKeys.add(String(idx.key));
-      if (idx?.uid) paxKeys.add(String(idx.uid));
+    for (const k of await collectPassengerJobKeysFromBooking(db, existing, [walletHint, uidHint])) {
+      paxKeys.add(k);
     }
 
     const writes: Promise<any>[] = [
@@ -783,17 +776,8 @@ stripeRouter.post("/stripe/webhook", async (req, res) => {
             ]) {
               if (k && String(k).trim()) paxKeys.add(String(k).trim());
             }
-            const phone = String(
-              existingBooking.PassengerPhone ?? existingBooking.passengerPhone ?? "",
-            ).replace(/[^0-9]/g, "");
-            if (phone.length >= 8) {
-              try {
-                const idx = (await db.ref(`passengerIndex/phone/${phone}`).once("value")).val();
-                if (idx?.key) paxKeys.add(String(idx.key));
-                if (idx?.uid) paxKeys.add(String(idx.uid));
-              } catch {
-                /* ignore */
-              }
+            for (const k of await collectPassengerJobKeysFromBooking(db, existingBooking)) {
+              paxKeys.add(k);
             }
             for (const pk of paxKeys) {
               writes.push(

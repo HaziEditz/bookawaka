@@ -9,7 +9,7 @@ import {
   sendBookingUpdatedEmails,
   sendBookingCancelledEmails,
 } from "../lib/bookingNotifyEmails";
-import { upsertPhoneIndex } from "../lib/passengerKey";
+import { collectPassengerJobKeys, collectPassengerJobKeysFromBooking, upsertPhoneIndex } from "../lib/passengerKey";
 import { selfServeCancelAllowed, SUPPORT_EMAIL } from "../lib/cancelCopy";
 import { forwardDispatchCancel } from "../lib/dispatchCancel";
 
@@ -125,16 +125,23 @@ bookingRouter.post("/booking/create", async (req: Request, res: Response) => {
       writes.push(db.ref(`pendingjobs/${companyId}/${jobId}`).set(enriched));
     }
 
-    // allbookings + Passengerjobs/{firebaseUid} are required for My Rides / Scheduled tab.
+    // allbookings + Passengerjobs under session uid AND phone/email index aliases
+    // so website My Rides and the passenger app see the same booking.
     writes.push(db.ref(`allbookings/${companyId}/${jobId}`).set(enriched));
-    writes.push(db.ref(`Passengerjobs/${paxKey}/${jobId}`).set(enriched));
 
-    // Merge phone → uid (+ email when known) so phone sign-in keeps working.
     const phone = String(enriched.PassengerPhone ?? enriched.passengerPhone ?? enriched.PhoneNo ?? enriched.phone ?? "")
       .replace(/[^0-9]/g, "");
     const paxEmail = String(
       enriched.PassengerEmail ?? enriched.passengerEmail ?? enriched.Email ?? "",
     ).trim();
+    const paxTrees = await collectPassengerJobKeys(db, {
+      uid: paxKey,
+      phone,
+      email: paxEmail || undefined,
+    });
+    for (const treeKey of paxTrees.length ? paxTrees : [paxKey]) {
+      writes.push(db.ref(`Passengerjobs/${treeKey}/${jobId}`).set(enriched));
+    }
     if (phone.length >= 7) {
       writes.push(upsertPhoneIndex(db, phone, paxKey, paxEmail || undefined));
     }
@@ -272,7 +279,12 @@ bookingRouter.post("/booking/cancel", async (req: Request, res: Response) => {
         cancelPassengerMessage: (fairness && fairness.passengerMessage) || "",
         ...(fairness ? { cancelFairness: fairness } : {}),
       };
-      await db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(paxPatch).catch(() => undefined);
+      const paxTrees = await collectPassengerJobKeysFromBooking(db, existing, [paxKey]);
+      await Promise.all(
+        (paxTrees.length ? paxTrees : [paxKey]).map((treeKey) =>
+          db.ref(`Passengerjobs/${treeKey}/${jobId}`).update(paxPatch).catch(() => undefined),
+        ),
+      );
 
       const merged: Record<string, unknown> = { ...existing, ...paxPatch };
       if (isScheduledBooking(merged)) {
@@ -330,10 +342,13 @@ bookingRouter.post("/booking/cancel", async (req: Request, res: Response) => {
         : {}),
     };
 
+    const paxTrees = await collectPassengerJobKeysFromBooking(db, existing, [paxKey]);
     await Promise.all([
       db.ref(`pendingjobs/${companyId}/${jobId}`).update(patchWithHistory),
       db.ref(`allbookings/${companyId}/${jobId}`).update(patchWithHistory),
-      db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(patchWithHistory),
+      ...(paxTrees.length ? paxTrees : [paxKey]).map((treeKey) =>
+        db.ref(`Passengerjobs/${treeKey}/${jobId}`).update(patchWithHistory),
+      ),
     ]);
 
     // Company (+ passenger) cancel email for scheduled/later jobs on intentional cancel.
@@ -413,9 +428,12 @@ bookingRouter.post("/booking/edit", async (req: Request, res: Response) => {
       EditHistory: [...prevHistory, historyEntry],
     };
 
+    const paxTrees = await collectPassengerJobKeysFromBooking(db, existing, [paxKey]);
     const writes: Promise<unknown>[] = [
       db.ref(`allbookings/${companyId}/${jobId}`).update(patch),
-      db.ref(`Passengerjobs/${paxKey}/${jobId}`).update(patch),
+      ...(paxTrees.length ? paxTrees : [paxKey]).map((treeKey) =>
+        db.ref(`Passengerjobs/${treeKey}/${jobId}`).update(patch),
+      ),
     ];
 
     // Only touch pendingjobs when a real dispatch row already exists (avoid sparse remnants).

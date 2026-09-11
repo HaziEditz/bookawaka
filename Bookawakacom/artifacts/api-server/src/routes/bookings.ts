@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getAuth, getDatabase } from "../lib/firebase";
 import { registerScheduledDispatch } from "../lib/scheduler";
-import { normalizeEmailKey, toCanonicalPhone, upsertPhoneIndex } from "../lib/passengerKey";
+import { collectPassengerJobKeys, normalizeEmailKey, toCanonicalPhone, upsertPhoneIndex } from "../lib/passengerKey";
 import { debitWallet, readWalletBalanceCents } from "../lib/wallet";
 import { findActiveBooking } from "../lib/active-booking-guard";
 import { searchNzPlaces } from "../lib/geocode-search";
@@ -431,6 +431,16 @@ bookingsRouter.post("/bookings", async (req, res) => {
     passengers: paxCount,
     PickAddress: pickAddress,
     pickAddress, // lowercase alias
+    // Passenger-app Schedule / History / recover read PickupAddress + DropoffAddress.
+    PickupAddress: pickAddress,
+    pickupAddress: pickAddress,
+    DropoffAddress: dropAddress,
+    dropoffAddress: dropAddress,
+    passengerUid: paxKey,
+    PassengerUid: paxKey,
+    passengerId: paxKey,
+    PassengerId: paxKey,
+    passengerKey: paxKey,
     PickLatLng: pickLatLngStr,
     DropLatLng: dropLatLngStr,
     Nextstop: String(stopList.length),
@@ -550,11 +560,15 @@ bookingsRouter.post("/bookings", async (req, res) => {
     );
 
     if (paxKey) {
-      writes.push(
-        db.ref(`/Passengerjobs/${paxKey}/${bookingId}`).set({
-          ...booking,
-        }),
-      );
+      const paxTrees = await collectPassengerJobKeys(db, {
+        uid: paxKey,
+        phone: normalizedPhone,
+        email: passengerEmail || undefined,
+      });
+      const paxRow = { ...booking };
+      for (const treeKey of paxTrees) {
+        writes.push(db.ref(`/Passengerjobs/${treeKey}/${bookingId}`).set(paxRow));
+      }
 
       // Merge phone/email/key indexes — never .set({key}) which wipes email.
       writes.push(upsertPhoneIndex(db, normalizedPhone, paxKey, passengerEmail || undefined));

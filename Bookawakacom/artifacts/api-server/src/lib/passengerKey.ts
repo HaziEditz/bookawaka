@@ -337,3 +337,49 @@ export async function resolvePassengerWalletKey(
 
   return null;
 }
+
+function addJobKey(keys: Set<string>, raw: unknown): void {
+  const s = String(raw || "").trim();
+  if (!s || s === "guest" || s.startsWith("web_")) return;
+  keys.add(s);
+}
+
+/**
+ * Every Passengerjobs/{key} tree this passenger might have been written under.
+ * Website create historically used session uid only; the app always reads
+ * auth.uid. Phone/email index can point at a sibling uid for the same account.
+ */
+export async function collectPassengerJobKeys(
+  db: FirebaseDatabase,
+  opts: { uid?: string; phone?: string; email?: string; extra?: unknown[] },
+): Promise<string[]> {
+  const keys = new Set<string>();
+  addJobKey(keys, opts.uid);
+  for (const extra of opts.extra || []) addJobKey(keys, extra);
+  if (opts.email) addJobKey(keys, await lookupEmailInIndex(db, opts.email));
+  if (opts.phone) addJobKey(keys, await lookupPhoneInIndex(db, opts.phone));
+  return [...keys];
+}
+
+/** Resolve every Passengerjobs tree stamped on a booking row plus phone/email index. */
+export async function collectPassengerJobKeysFromBooking(
+  db: FirebaseDatabase,
+  booking: Record<string, unknown> | null | undefined,
+  extra?: unknown[],
+): Promise<string[]> {
+  const b = booking || {};
+  return collectPassengerJobKeys(db, {
+    uid: String(b.passengerUid ?? b.PassengerUid ?? b.passengerId ?? b.PassengerId ?? b.passengerKey ?? ""),
+    phone: String(b.PassengerPhone ?? b.passengerPhone ?? b.PhoneNo ?? b.phone ?? ""),
+    email: String(b.PassengerEmail ?? b.passengerEmail ?? b.Email ?? ""),
+    extra: [
+      ...(extra || []),
+      b.passengerUid,
+      b.PassengerUid,
+      b.passengerId,
+      b.PassengerId,
+      b.passengerKey,
+      b.PassengerKey,
+    ],
+  });
+}
