@@ -82,6 +82,19 @@ export function phoneIndexCandidates(digits: string): string[] {
   return [...new Set(out)];
 }
 
+function addIndexRowKeys(keys: Set<string>, val: unknown): void {
+  if (!val || typeof val !== "object") return;
+  const row = val as Record<string, unknown>;
+  addJobKey(keys, row.key);
+  addJobKey(keys, row.uid);
+  const aliases = row.aliases;
+  if (Array.isArray(aliases)) {
+    for (const a of aliases) addJobKey(keys, a);
+  } else if (aliases && typeof aliases === "object") {
+    for (const k of Object.keys(aliases as Record<string, unknown>)) addJobKey(keys, k);
+  }
+}
+
 async function lookupEmailInIndex(
   db: FirebaseDatabase,
   email: string,
@@ -89,20 +102,21 @@ async function lookupEmailInIndex(
   const emailKey = emailIndexKey(email);
   if (!emailKey) return null;
   const snap = await db.ref(`passengerIndex/email/${emailKey}`).once("value");
-  const key = snap.val()?.key;
-  return key ? String(key) : null;
+  const keys = new Set<string>();
+  addIndexRowKeys(keys, snap.val());
+  return keys.size ? [...keys][0] : null;
 }
 
 async function lookupPhoneInIndex(
   db: FirebaseDatabase,
   digits: string,
 ): Promise<string | null> {
+  const keys = new Set<string>();
   for (const candidate of phoneIndexCandidates(digits)) {
     const snap = await db.ref(`passengerIndex/phone/${candidate}`).once("value");
-    const key = snap.val()?.key;
-    if (key) return String(key);
+    addIndexRowKeys(keys, snap.val());
   }
-  return null;
+  return keys.size ? [...keys][0] : null;
 }
 
 async function walletExists(db: FirebaseDatabase, key: string): Promise<boolean> {
@@ -203,14 +217,22 @@ export async function upsertPhoneIndex(
   // Always require a real email so we never leave/write key-only poison rows.
   if (!resolvedEmail.includes("@")) return;
 
-  const phonePayload: Record<string, string | number> = {
+  const existingPhone = (await db.ref(`passengerIndex/phone/${canonical}`).once("value")).val();
+  const aliasKeys = new Set<string>();
+  addIndexRowKeys(aliasKeys, existingPhone);
+  addJobKey(aliasKeys, uid);
+  const aliases: Record<string, boolean> = {};
+  for (const k of aliasKeys) aliases[k] = true;
+
+  const phonePayload: Record<string, string | number | Record<string, boolean>> = {
     key: uid,
     uid,
     email: resolvedEmail,
     updatedAt: Date.now(),
+    ...(Object.keys(aliases).length ? { aliases } : {}),
   };
 
-  const updates: Record<string, Record<string, string | number> | null> = {};
+  const updates: Record<string, unknown> = {};
   // Write the single canonical row
   updates[`passengerIndex/phone/${canonical}`] = phonePayload;
 
@@ -234,11 +256,18 @@ export async function upsertPhoneIndex(
   if (resolvedEmail.includes("@")) {
     const emailKey = emailIndexKey(resolvedEmail);
     if (emailKey) {
+      const existingEmail = (await db.ref(`passengerIndex/email/${emailKey}`).once("value")).val();
+      const emailAliases: Record<string, boolean> = {};
+      const emailKeys = new Set<string>();
+      addIndexRowKeys(emailKeys, existingEmail);
+      addJobKey(emailKeys, uid);
+      for (const k of emailKeys) emailAliases[k] = true;
       updates[`passengerIndex/email/${emailKey}`] = {
         key: uid,
         uid,
         email: resolvedEmail,
         updatedAt: Date.now(),
+        ...(Object.keys(emailAliases).length ? { aliases: emailAliases } : {}),
       };
     }
   }
@@ -356,8 +385,19 @@ export async function collectPassengerJobKeys(
   const keys = new Set<string>();
   addJobKey(keys, opts.uid);
   for (const extra of opts.extra || []) addJobKey(keys, extra);
-  if (opts.email) addJobKey(keys, await lookupEmailInIndex(db, opts.email));
-  if (opts.phone) addJobKey(keys, await lookupPhoneInIndex(db, opts.phone));
+  if (opts.email) {
+    const emailKey = emailIndexKey(opts.email);
+    if (emailKey) {
+      const snap = await db.ref(`passengerIndex/email/${emailKey}`).once("value");
+      addIndexRowKeys(keys, snap.val());
+    }
+  }
+  if (opts.phone) {
+    for (const candidate of phoneIndexCandidates(opts.phone)) {
+      const snap = await db.ref(`passengerIndex/phone/${candidate}`).once("value");
+      addIndexRowKeys(keys, snap.val());
+    }
+  }
   return [...keys];
 }
 

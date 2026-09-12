@@ -12,6 +12,7 @@ import {
 import { collectPassengerJobKeys, collectPassengerJobKeysFromBooking, upsertPhoneIndex } from "../lib/passengerKey";
 import { selfServeCancelAllowed, SUPPORT_EMAIL } from "../lib/cancelCopy";
 import { forwardDispatchCancel } from "../lib/dispatchCancel";
+import { findActiveBooking } from "../lib/active-booking-guard";
 
 const bookingRouter = Router();
 
@@ -97,6 +98,10 @@ bookingRouter.post("/booking/create", async (req: Request, res: Response) => {
   const hold = isCardHold(rtdbData);
   const scheduled = isScheduledBooking(rtdbData);
   const nowIso = new Date().toISOString();
+  const phoneForGuard = String(
+    rtdbData.PassengerPhone ?? rtdbData.passengerPhone ?? rtdbData.PhoneNo ?? rtdbData.phone ?? "",
+  );
+  const serviceForGuard = String(rtdbData.ServiceType ?? rtdbData.serviceType ?? "taxi");
 
   // Stamp identity so verify-and-dispatch can update the same Passengerjobs key.
   const enriched: Record<string, unknown> = {
@@ -116,6 +121,20 @@ bookingRouter.post("/booking/create", async (req: Request, res: Response) => {
 
   try {
     const db = getDatabase();
+    if (!scheduled && phoneForGuard.replace(/[^0-9]/g, "").length >= 7) {
+      const match = await findActiveBooking(phoneForGuard, serviceForGuard, jobId);
+      if (match) {
+        res.status(409).json({
+          error: `You already have an active ${match.serviceType} booking (#${match.existingBookingId}). Please wait for it to be completed or cancel it before booking another.`,
+          code: "DUPLICATE_ACTIVE_BOOKING",
+          existingBookingId: match.existingBookingId,
+          existingStatus: match.existingStatus,
+          serviceType: match.serviceType,
+        });
+        return;
+      }
+    }
+
     const writes: Promise<unknown>[] = [];
 
     // Card hold: allbookings + Passengerjobs only — pendingjobs after Stripe confirms.
