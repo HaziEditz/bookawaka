@@ -34,7 +34,9 @@ export async function fetchActiveAsapBooking(
     serviceType: serviceType || "taxi",
   });
   const prefix = String(baseUrl || "").replace(/\/$/, "");
-  const res = await fetch(`${prefix}/api/bookings/active-check?${params}`);
+  const res = await fetch(`${prefix}/api/bookings/active-check?${params}`, {
+    signal: AbortSignal.timeout(8_000),
+  });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return parseActiveAsapCheck(data);
 }

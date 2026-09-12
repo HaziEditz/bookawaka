@@ -71,3 +71,85 @@ test("website blocks ASAP at first tap and keeps Later available", () => {
   assert.match(home, /fetchActiveAsapBooking/);
   assert.match(ACTIVE_ASAP_LATER_ONLY_MSG, /Later booking/);
 });
+
+import {
+  parseCompanyVehicleTypes,
+  resolveBookingVehicleType,
+  vehicleTypeLooksLikeVan,
+} from "./companyVehicleTypes.ts";
+import {
+  farePurposeForVehicle,
+  parseCompanyVehicleTypesFromApi,
+  pickForcedVehicleForPax,
+} from "../../../invercargill-taxis/src/lib/companyVehicleTypes.ts";
+
+test("Owner Panel vehicleTypes parse drops inactive rows and keeps real names", () => {
+  const parsed = parseCompanyVehicleTypes({
+    "6-seater-van": {
+      active: true,
+      capacity: 6,
+      name: "6-seater Van",
+    },
+    wheelchair: {
+      active: true,
+      capacity: 6,
+      name: "Wheelchair",
+    },
+    sedan: {
+      active: false,
+      capacity: 4,
+      name: "Sedan",
+    },
+  });
+  assert.deepEqual(
+    parsed.map((t) => t.name).sort(),
+    ["6-seater Van", "Wheelchair"],
+  );
+  assert.equal(vehicleTypeLooksLikeVan("6-seater Van"), true);
+  assert.equal(vehicleTypeLooksLikeVan("Car"), false);
+});
+
+test("booking stamp keeps Owner Panel van name instead of rewriting to generic Van", () => {
+  assert.equal(resolveBookingVehicleType({ vehicleType: "Any", passengers: 1 }), "");
+  assert.equal(resolveBookingVehicleType({ vehicleType: "Sedan", passengers: 1 }), "Sedan");
+  assert.equal(
+    resolveBookingVehicleType({ vehicleType: "6-seater Van", passengers: 6 }),
+    "6-seater Van",
+  );
+  assert.equal(resolveBookingVehicleType({ vehicleType: "Car", passengers: 6 }), "Van");
+});
+
+test("website booking form lists Owner Panel types and times out hung creates", () => {
+  const book = readFileSync(join(root, "../../invercargill-taxis/src/pages/BookPage.tsx"), "utf8");
+  const companies = readFileSync(join(root, "routes/companies.ts"), "utf8");
+  assert.match(companies, /parseCompanyVehicleTypes/);
+  assert.match(companies, /vehicleTypes: parseCompanyVehicleTypes/);
+  assert.doesNotMatch(book, /\["Any", "Sedan", "SUV", "Van"/);
+  assert.match(book, /ownerVehicleTypes\.map/);
+  assert.match(book, /AbortSignal\.timeout\(25_000\)/);
+  assert.match(book, /pickForcedVehicleForPax/);
+  const guard = readFileSync(join(root, "lib/active-booking-guard.ts"), "utf8");
+  assert.match(guard, /paxRowNeedsLiveConfirm/);
+  assert.match(guard, /ACTIVE_CHECK_TIMEOUT_MS/);
+});
+
+test("paxRowNeedsLiveConfirm skips terminal Passengerjobs without allbookings reads", () => {
+  assert.equal(isLiveAsapStatus("Completed"), false);
+  assert.equal(isLiveAsapStatus("Cancelled"), false);
+  assert.equal(isLiveAsapStatus("PendingPayment"), false);
+  assert.equal(isLiveAsapStatus("Scheduled"), false);
+  assert.equal(isLiveAsapStatus("Pending"), true);
+  const guard = readFileSync(join(root, "lib/active-booking-guard.ts"), "utf8");
+  assert.match(guard, /if \(!paxRowNeedsLiveConfirm\(paxStatus\)\) continue/);
+});
+
+test("5+ pax picks the company's van-class type from Owner Panel", () => {
+  const types = parseCompanyVehicleTypesFromApi([
+    { id: "car", name: "Car", capacity: 4 },
+    { id: "van", name: "6-seater Van", capacity: 6 },
+  ]);
+  assert.equal(pickForcedVehicleForPax(types, 6), "6-seater Van");
+  assert.equal(farePurposeForVehicle({ vehicleName: "6-seater Van", passengers: 1, paymentMethod: "cash" }), "Van");
+  assert.equal(farePurposeForVehicle({ vehicleName: "Car", passengers: 1, paymentMethod: "cash" }), "Standard");
+});
+

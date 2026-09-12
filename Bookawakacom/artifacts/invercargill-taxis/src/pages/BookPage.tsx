@@ -19,6 +19,14 @@ import {
   ACTIVE_ASAP_LATER_ONLY_TITLE,
   fetchActiveAsapBooking,
 } from "@/lib/asapDuplicateUx";
+import {
+  ANY_VEHICLE,
+  farePurposeForVehicle,
+  parseCompanyVehicleTypesFromApi,
+  pickForcedVehicleForPax,
+  vehicleOptionLabel,
+  type CompanyVehicleType,
+} from "@/lib/companyVehicleTypes";
 import { bookingTimeCancelRules, SUPPORT_EMAIL } from "@/lib/cancelCopy";
 import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
@@ -70,24 +78,15 @@ interface Company {
   /** ASAP allowed when dispatch online + within operating hours. */
   asapBookable?: boolean;
   asapBlockReason?: string;
+  /** Active Owner Panel types (`vehicleTypes/{cid}`). Empty → Any only. */
+  vehicleTypes?: CompanyVehicleType[];
 }
 
 /**
  * Vehicle picker for taxi bookings.
- * "Any" = no hard VehicleType on the booking (open eligibility) — default for 1–4 pax
- * when the passenger has not explicitly chosen a type. Explicit picks are honored.
+ * "Any" = no hard VehicleType on the booking (open eligibility).
+ * Explicit picks use this company's Owner Panel types, not a generic list.
  */
-const VEHICLE_TYPES = ["Any", "Sedan", "SUV", "Van", "Luxury", "Electric", "Wheelchair"] as const;
-type VehicleTypeOption = (typeof VEHICLE_TYPES)[number];
-const VEHICLE_LABELS: Record<VehicleTypeOption, string> = {
-  Any: "Any",
-  Sedan: "Sedan",
-  SUV: "SUV",
-  Van: "Van",
-  Luxury: "Luxury",
-  Electric: "Electric",
-  Wheelchair: "Accessible / WAV",
-};
 
 function normalizeServices(services: unknown): string[] {
   if (Array.isArray(services)) {
@@ -119,6 +118,7 @@ function normalizeCompanies(raw: unknown): Company[] {
       dispatchOnline: c.dispatchOnline === true,
       asapBookable: c.asapBookable !== false,
       asapBlockReason: c.asapBlockReason != null ? String(c.asapBlockReason) : undefined,
+      vehicleTypes: parseCompanyVehicleTypesFromApi(c.vehicleTypes),
     }))
     .filter((c) => c.id);
 }
@@ -268,7 +268,7 @@ export default function BookPage() {
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("card");
   const [cardOnly, setCardOnly] = useState(false);
-  const [vehicleType, setVehicleType] = useState<VehicleTypeOption>("Any");
+  const [vehicleType, setVehicleType] = useState(ANY_VEHICLE);
   const [passengers, setPassengers] = useState(1);
   const [paymentRef, setPaymentRef] = useState("");
   const [verifying, setVerifying] = useState(false);
@@ -686,12 +686,35 @@ export default function BookPage() {
     }
   }, [paymentConfig, paymentMethod]);
 
-  // 5+ passengers require Van tariff + van vehicle.
+  const ownerVehicleTypes = selectedCompany?.vehicleTypes ?? [];
+  const forcedVehicleForPax = pickForcedVehicleForPax(ownerVehicleTypes, passengers);
+  const effectiveVehicleType =
+    passengers >= 5 ? (forcedVehicleForPax || vehicleType) : vehicleType;
+
   useEffect(() => {
-    if (passengers >= 5 && vehicleType !== "Van") {
-      setVehicleType("Van");
+    if (!selectedCompany) return;
+    const fresh = companies.find((c) => c.id === selectedCompany.id);
+    if (!fresh) return;
+    const prev = JSON.stringify(selectedCompany.vehicleTypes ?? []);
+    const next = JSON.stringify(fresh.vehicleTypes ?? []);
+    if (prev !== next) {
+      setSelectedCompany((s) => (s ? { ...s, vehicleTypes: fresh.vehicleTypes } : s));
     }
-  }, [passengers, vehicleType]);
+  }, [companies, selectedCompany]);
+
+  useEffect(() => {
+    const names = ownerVehicleTypes.map((t) => t.name);
+    if (vehicleType !== ANY_VEHICLE && names.length > 0 && !names.includes(vehicleType)) {
+      setVehicleType(ANY_VEHICLE);
+    }
+  }, [selectedCompany?.id, ownerVehicleTypes, vehicleType]);
+
+  // 5+ passengers require a van-class Owner Panel type (not a hardcoded "Van").
+  useEffect(() => {
+    if (passengers >= 5 && forcedVehicleForPax && vehicleType !== forcedVehicleForPax) {
+      setVehicleType(forcedVehicleForPax);
+    }
+  }, [passengers, forcedVehicleForPax, vehicleType]);
 
   // Auto-fetch fare estimate. Works in two modes:
   //   1. Coords already resolved (user picked from autocomplete suggestions) → fire immediately
@@ -749,18 +772,18 @@ export default function BookPage() {
           return;
         }
 
-        const purpose =
-          paymentMethod === "tm"
-            ? "Total Mobility"
-            : passengers >= 5 || vehicleType === "Van" || vehicleType === "Wheelchair"
-              ? "Van"
-              : "Standard";
+        const purpose = farePurposeForVehicle({
+          vehicleName: effectiveVehicleType,
+          passengers,
+          paymentMethod,
+        });
         const atParam =
           bookingType === "scheduled" && form.scheduledFor
             ? `&at=${encodeURIComponent(new Date(form.scheduledFor).toISOString())}`
             : "";
         const r = await fetch(
-          `${import.meta.env.BASE_URL}api/fare-estimate?cid=${selectedCompany.id}&fromLat=${pLat}&fromLng=${pLng}&toLat=${dLat}&toLng=${dLng}&purpose=${encodeURIComponent(purpose)}&passengers=${passengers}&vehicleType=${encodeURIComponent(vehicleType)}${atParam}`,
+          `${import.meta.env.BASE_URL}api/fare-estimate?cid=${selectedCompany.id}&fromLat=${pLat}&fromLng=${pLng}&toLat=${dLat}&toLng=${dLng}&purpose=${encodeURIComponent(purpose)}&passengers=${passengers}&vehicleType=${encodeURIComponent(effectiveVehicleType)}${atParam}`,
+          { signal: AbortSignal.timeout(20_000) },
         );
         const d = await r.json();
         if (cancelled) return;
@@ -784,9 +807,11 @@ export default function BookPage() {
   }, [pickCoords, dropCoords, form.pickAddress, form.dropAddress, form.scheduledFor, selectedCompany, selectedService, passengers, vehicleType, paymentMethod, bookingType]);
 
   const reserveJobId = async (): Promise<string> => {
+    try {
     const res = await fetch(`${import.meta.env.BASE_URL}api/job/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(25_000),
       body: JSON.stringify({
         companyId: selectedCompany!.id,
         source: selectedService === "food" ? "food" : selectedService === "courier" ? "freight" : "web",
@@ -799,6 +824,13 @@ export default function BookPage() {
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not reserve a job ID");
     return data.jobId as string;
+    } catch (err: unknown) {
+      const e = err as { name?: string };
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+        throw new Error("Booking is taking too long. Please try again — it was not confirmed.");
+      }
+      throw err;
+    }
   };
 
   const createBooking = async (
@@ -833,6 +865,7 @@ export default function BookPage() {
           ? { Authorization: `Bearer ${getPassengerSession()!.idToken}` }
           : {}),
       },
+      signal: AbortSignal.timeout(25_000),
       body: JSON.stringify({
         jobId,
         passengerKey,
@@ -852,14 +885,12 @@ export default function BookPage() {
         notes: form.notes,
         amount: form.amount ? parseFloat(form.amount) : undefined,
         paymentMethod: payMethod,
-        // 5+ → Van. Explicit type → stamp it. "Any" / no pick → omit VehicleType (open eligibility).
+        // Explicit Owner Panel type → stamp it. "Any" / no pick → omit (open eligibility).
         vehicleType:
           selectedService === "taxi"
-            ? passengers >= 5
-              ? "Van"
-              : vehicleType === "Any"
-                ? undefined
-                : vehicleType
+            ? effectiveVehicleType === ANY_VEHICLE
+              ? undefined
+              : effectiveVehicleType
             : undefined,
         passengers: selectedService === "taxi" ? passengers : undefined,
         pickLat: pickCoords?.lat ?? 0,
@@ -892,6 +923,10 @@ export default function BookPage() {
   };
 
   const handleBookingError = (err: any) => {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      setError("Booking is taking too long. Please try again — it was not confirmed.");
+      return;
+    }
     if (err?.code === "DUPLICATE_ACTIVE_BOOKING" && err.existingBookingId) {
       setActiveBooking({
         existingBookingId: err.existingBookingId,
@@ -1673,18 +1708,15 @@ export default function BookPage() {
                       <Label htmlFor="vehicleType" className="font-semibold text-sm">Vehicle</Label>
                       <select
                         id="vehicleType"
-                        value={passengers >= 5 ? "Van" : vehicleType}
+                        value={effectiveVehicleType}
                         disabled={passengers >= 5}
-                        onChange={(e) => setVehicleType(e.target.value as VehicleTypeOption)}
+                        onChange={(e) => setVehicleType(e.target.value)}
                         className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
                       >
-                        {VEHICLE_TYPES.map((vt) => (
-                          <option
-                            key={vt}
-                            value={vt}
-                            disabled={passengers >= 5 && vt !== "Van"}
-                          >
-                            {VEHICLE_LABELS[vt]}
+                        <option value={ANY_VEHICLE}>{vehicleOptionLabel(ANY_VEHICLE)}</option>
+                        {ownerVehicleTypes.map((vt) => (
+                          <option key={vt.id || vt.name} value={vt.name}>
+                            {vehicleOptionLabel(vt.name, vt.capacity)}
                           </option>
                         ))}
                       </select>
@@ -1972,7 +2004,13 @@ export default function BookPage() {
                 {selectedService === "taxi" && (
                   <>
                     <Row label="Passengers" value={String(passengers)} />
-                    <Row label="Vehicle" value={VEHICLE_LABELS[passengers >= 5 ? "Van" : vehicleType]} />
+                    <Row
+                      label="Vehicle"
+                      value={vehicleOptionLabel(
+                        effectiveVehicleType,
+                        ownerVehicleTypes.find((t) => t.name === effectiveVehicleType)?.capacity,
+                      )}
+                    />
                   </>
                 )}
                 <Row label="Passenger" value={form.passengerName} />
@@ -2429,7 +2467,7 @@ export default function BookPage() {
                     setBookingType("now");
                     setForm({ passengerName: "", passengerPhone: "", passengerEmail: "", pickAddress: "", dropAddress: "", scheduledFor: "", notes: "", amount: "" });
                     setPassengers(1);
-                    setVehicleType("Any");
+                    setVehicleType(ANY_VEHICLE);
                     setBookingId(null);
                     setWasScheduled(false);
                     setPaidByCard(false);

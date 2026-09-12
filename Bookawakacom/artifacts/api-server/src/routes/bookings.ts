@@ -9,6 +9,7 @@ import { estimateDispatchLeadMins } from "../lib/estimateDispatchLeadMins";
 import { resolveCompanyBaseLocation } from "../lib/resolveCompanyBaseLocation";
 import { formatNzBookingDateTime } from "../lib/formatNzBookingDateTime";
 import { sendBookingCreatedEmails } from "../lib/bookingNotifyEmails";
+import { resolveBookingVehicleType } from "../lib/companyVehicleTypes";
 
 const SA_DISPATCH_URL = "https://taxitime.co.nz/DataManager/Data.aspx";
 
@@ -378,15 +379,13 @@ bookingsRouter.post("/bookings", async (req, res) => {
     if (!isNaN(n) && n >= 1) return Math.min(n, 20);
     return 1;
   })();
-  // 5+ passengers force Van vehicle type for dispatch eligibility.
+  // 5+ passengers require a van-class type. Keep the Owner Panel name
+  // ("6-seater Van") — do not rewrite it to a generic "Van" the company may not have.
   // "Any" / "Not Specified" / blank = open eligibility (no VehicleType stamp).
-  let resolvedVehicleType = vehicleType ? String(vehicleType).trim() : "";
-  if (/^(any|not\s*specified|all)$/i.test(resolvedVehicleType)) {
-    resolvedVehicleType = "";
-  }
-  if (paxCount >= 5) {
-    resolvedVehicleType = "Van";
-  }
+  const resolvedVehicleType = resolveBookingVehicleType({
+    vehicleType,
+    passengers: paxCount,
+  });
 
   const booking = {
     BookingId: bookingId,
@@ -484,7 +483,7 @@ bookingsRouter.post("/bookings", async (req, res) => {
     Status: status,
     WebBooking: true,
     dispatcherOnly: false,
-    // Vehicle type — same labels as passenger app (Sedan/SUV/Van/Luxury/Electric/Wheelchair).
+    // Vehicle type — Owner Panel name when the passenger picked one.
     // Auto-dispatch filters on VehicleType via _driverEligibleForJob.
     ...(resolvedVehicleType
       ? { VehicleType: resolvedVehicleType, vehicleType: resolvedVehicleType }

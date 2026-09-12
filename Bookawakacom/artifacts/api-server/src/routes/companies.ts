@@ -4,6 +4,7 @@ import {
   asapBookingAllowed,
   isCompanyDispatchOnline,
 } from "../lib/companyBookingAvailability";
+import { parseCompanyVehicleTypes } from "../lib/companyVehicleTypes";
 
 const companiesRouter = Router();
 
@@ -44,6 +45,8 @@ companiesRouter.get("/companies", async (req, res) => {
     // ASAP gate: company dispatch console presence (ignore individual drivers).
     const dispSnap = await db.ref("/activeDispatchers").once("value");
     const dispMap = (dispSnap.val() as Record<string, any> | null) ?? {};
+    const vtSnap = await db.ref("/vehicleTypes").once("value");
+    const vtRoot = (vtSnap.val() as Record<string, unknown> | null) ?? {};
     const nowMs = Date.now();
 
     const companies = Object.entries(profiles)
@@ -98,6 +101,7 @@ companiesRouter.get("/companies", async (req, res) => {
           dispatchOnline,
           asapBookable: asap.allowed,
           asapBlockReason: asap.reason,
+          vehicleTypes: parseCompanyVehicleTypes(vtRoot[id]),
         };
       });
 
@@ -124,6 +128,8 @@ companiesRouter.get("/public/companies", async (req, res) => {
     const settingsMap = (settingsSnap.val() as Record<string, any> | null) ?? {};
     const dispSnap = await db.ref("/activeDispatchers").once("value");
     const dispMap = (dispSnap.val() as Record<string, any> | null) ?? {};
+    const vtSnap = await db.ref("/vehicleTypes").once("value");
+    const vtRoot = (vtSnap.val() as Record<string, unknown> | null) ?? {};
     const nowMs = Date.now();
 
     const companies = Object.entries(profiles)
@@ -153,6 +159,7 @@ companiesRouter.get("/public/companies", async (req, res) => {
           dispatchOnline,
           asapBookable: asap.allowed,
           asapBlockReason: asap.reason,
+          vehicleTypes: parseCompanyVehicleTypes(vtRoot[id]),
         };
       });
 
