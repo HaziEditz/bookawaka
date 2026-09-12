@@ -73,7 +73,7 @@ test("website blocks ASAP at first tap and keeps Later available", () => {
 });
 
 import {
-  parseCompanyVehicleTypes,
+  parseFleetVehicleTypes,
   resolveBookingVehicleType,
   vehicleTypeLooksLikeVan,
 } from "./companyVehicleTypes.ts";
@@ -83,33 +83,59 @@ import {
   pickForcedVehicleForPax,
 } from "../../../invercargill-taxis/src/lib/companyVehicleTypes.ts";
 
-test("Owner Panel vehicleTypes parse drops inactive rows and keeps real names", () => {
-  const parsed = parseCompanyVehicleTypes({
-    "6-seater-van": {
-      active: true,
-      capacity: 6,
-      name: "6-seater Van",
+test("fleet parse uses real vehicles, ignores catalog-only Wheelchair and stale VehicleType aliases", () => {
+  const parsed = parseFleetVehicleTypes(
+    {
+      "860869": {
+        "201": {
+          VehicleType: "Sedan",
+          active: true,
+          companyId: "860869",
+          make: "Toyota",
+          model: "Estima",
+          seatCapacity: 6,
+          seats: 6,
+          status: "active",
+          taxiNumber: "201",
+          vehicleType: "6-seater Van",
+        },
+        "202": {
+          active: true,
+          companyId: "860869",
+          make: "Toyota",
+          model: "prius",
+          seatCapacity: 4,
+          status: "active",
+          taxiNumber: "202",
+          vehicleType: "Sedan",
+        },
+      },
+      "-dup-201": {
+        companyId: "860869",
+        status: "active",
+        taxiNumber: "201",
+        vehicleType: "6-seater Van",
+        capacity: "6",
+      },
+      "-inactive-wav": {
+        companyId: "860869",
+        status: "inactive",
+        taxiNumber: "199",
+        vehicleType: "Wheelchair",
+        seatCapacity: 6,
+      },
     },
-    wheelchair: {
-      active: true,
-      capacity: 6,
-      name: "Wheelchair",
-    },
-    sedan: {
-      active: false,
-      capacity: 4,
-      name: "Sedan",
-    },
-  });
+    "860869",
+  );
   assert.deepEqual(
-    parsed.map((t) => t.name).sort(),
-    ["6-seater Van", "Wheelchair"],
+    parsed.map((t) => `${t.name}:${t.capacity}`).sort(),
+    ["6-seater Van:6", "Sedan:4"],
   );
   assert.equal(vehicleTypeLooksLikeVan("6-seater Van"), true);
   assert.equal(vehicleTypeLooksLikeVan("Car"), false);
 });
 
-test("booking stamp keeps Owner Panel van name instead of rewriting to generic Van", () => {
+test("booking stamp keeps fleet van name instead of rewriting to generic Van", () => {
   assert.equal(resolveBookingVehicleType({ vehicleType: "Any", passengers: 1 }), "");
   assert.equal(resolveBookingVehicleType({ vehicleType: "Sedan", passengers: 1 }), "Sedan");
   assert.equal(
@@ -119,11 +145,13 @@ test("booking stamp keeps Owner Panel van name instead of rewriting to generic V
   assert.equal(resolveBookingVehicleType({ vehicleType: "Car", passengers: 6 }), "Van");
 });
 
-test("website booking form lists Owner Panel types and times out hung creates", () => {
+test("website booking form lists fleet types and times out hung creates", () => {
   const book = readFileSync(join(root, "../../invercargill-taxis/src/pages/BookPage.tsx"), "utf8");
   const companies = readFileSync(join(root, "routes/companies.ts"), "utf8");
-  assert.match(companies, /parseCompanyVehicleTypes/);
-  assert.match(companies, /vehicleTypes: parseCompanyVehicleTypes/);
+  assert.match(companies, /parseFleetVehicleTypes/);
+  assert.match(companies, /vehicleTypes: parseFleetVehicleTypes\(vehRoot, id\)/);
+  assert.match(companies, /db\.ref\("\/vehicles"\)/);
+  assert.doesNotMatch(companies, /db\.ref\("\/vehicleTypes"\)/);
   assert.doesNotMatch(book, /\["Any", "Sedan", "SUV", "Van"/);
   assert.match(book, /ownerVehicleTypes\.map/);
   assert.match(book, /AbortSignal\.timeout\(25_000\)/);
@@ -143,7 +171,7 @@ test("paxRowNeedsLiveConfirm skips terminal Passengerjobs without allbookings re
   assert.match(guard, /if \(!paxRowNeedsLiveConfirm\(paxStatus\)\) continue/);
 });
 
-test("5+ pax picks the company's van-class type from Owner Panel", () => {
+test("5+ pax picks the company's van-class type from the fleet", () => {
   const types = parseCompanyVehicleTypesFromApi([
     { id: "car", name: "Car", capacity: 4 },
     { id: "van", name: "6-seater Van", capacity: 6 },

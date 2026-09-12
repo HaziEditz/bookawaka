@@ -78,14 +78,14 @@ interface Company {
   /** ASAP allowed when dispatch online + within operating hours. */
   asapBookable?: boolean;
   asapBlockReason?: string;
-  /** Active Owner Panel types (`vehicleTypes/{cid}`). Empty → Any only. */
+  /** Unique types from this company's real fleet vehicles. Empty → Any only. */
   vehicleTypes?: CompanyVehicleType[];
 }
 
 /**
  * Vehicle picker for taxi bookings.
  * "Any" = no hard VehicleType on the booking (open eligibility).
- * Explicit picks use this company's Owner Panel types, not a generic list.
+ * Explicit picks use this company's real fleet types, not the Settings catalog.
  */
 
 function normalizeServices(services: unknown): string[] {
@@ -709,7 +709,7 @@ export default function BookPage() {
     }
   }, [selectedCompany?.id, ownerVehicleTypes, vehicleType]);
 
-  // 5+ passengers require a van-class Owner Panel type (not a hardcoded "Van").
+  // 5+ passengers require a van-class fleet type (not a hardcoded "Van").
   useEffect(() => {
     if (passengers >= 5 && forcedVehicleForPax && vehicleType !== forcedVehicleForPax) {
       setVehicleType(forcedVehicleForPax);

@@ -1,4 +1,4 @@
-/** Company vehicle types from Owner Panel (`vehicleTypes/{cid}` via GET /companies). */
+/** Company vehicle types from the real fleet (`vehicles` via GET /companies). */
 
 export const ANY_VEHICLE = "Any";
 
@@ -30,7 +30,7 @@ export function vehicleTypeLooksLikeVan(name: string): boolean {
   return /van|minibus|wav|wheelchair|accessible/.test(s);
 }
 
-/** 5+ passengers: first Owner Panel type that seats them, preferring van-class. */
+/** 5+ passengers: first fleet type that seats them, preferring van-class. */
 export function pickForcedVehicleForPax(types: CompanyVehicleType[], pax: number): string | null {
   if (pax < 5) return null;
   const fit = types.filter((t) => t.capacity >= pax);
