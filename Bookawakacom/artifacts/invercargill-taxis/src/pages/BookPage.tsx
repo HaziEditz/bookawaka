@@ -14,6 +14,11 @@ import BookingMapPanel from "@/components/BookingMapPanel";
 import { NzDateTimeInput } from "@/components/NzDateTimeInput";
 import PhoneField from "@/components/PhoneField";
 import { getPassengerSession } from "@/lib/passengerKey";
+import {
+  ACTIVE_ASAP_LATER_ONLY_MSG,
+  ACTIVE_ASAP_LATER_ONLY_TITLE,
+  fetchActiveAsapBooking,
+} from "@/lib/asapDuplicateUx";
 import { bookingTimeCancelRules, SUPPORT_EMAIL } from "@/lib/cancelCopy";
 import { fromNZDatetimeLocal, toNZDatetimeLocal } from "@/lib/nzDatetimeLocal";
 import {
@@ -491,12 +496,9 @@ export default function BookPage() {
       .catch(() => setPaymentConfig(null));
   }, [selectedCompany]);
 
-  // Proactively warn if passenger already has an active ASAP booking for this service
+  // Check as soon as we have a phone — keep the flag on Later so Now stays disabled.
   useEffect(() => {
-    if (bookingType === "scheduled" || !selectedService || step >= 4) {
-      setActiveBooking(null);
-      return;
-    }
+    if (step >= 4) return;
     const phone = form.passengerPhone.trim();
     if (phone.replace(/\D/g, "").length < 7) {
       setActiveBooking(null);
@@ -504,25 +506,23 @@ export default function BookPage() {
     }
     const timer = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ phone, serviceType: selectedService });
-        const res = await fetch(`${import.meta.env.BASE_URL}api/bookings/active-check?${params}`);
-        const d = await res.json();
-        if (d.hasActive && d.existingBookingId) {
-          setActiveBooking({
-            existingBookingId: d.existingBookingId,
-            existingStatus: d.existingStatus,
-            serviceType: d.serviceType,
-            message: d.message ?? "You already have an active booking.",
-          });
+        const match = await fetchActiveAsapBooking(
+          phone,
+          selectedService || "taxi",
+          import.meta.env.BASE_URL,
+        );
+        if (match) {
+          setActiveBooking(match);
+          setBookingType((prev) => (prev === "now" ? "scheduled" : prev));
         } else {
           setActiveBooking(null);
         }
       } catch {
         setActiveBooking(null);
       }
-    }, 450);
+    }, 200);
     return () => clearTimeout(timer);
-  }, [form.passengerPhone, selectedService, bookingType, step]);
+  }, [form.passengerPhone, selectedService, step]);
 
   useEffect(() => {
     if (!selectedCompany || selectedService !== "food") return;
@@ -997,6 +997,11 @@ export default function BookPage() {
 
   const assertAsapAllowed = (): boolean => {
     if (bookingType === "scheduled") return true;
+    if (activeBooking) {
+      setBookingType("scheduled");
+      setError(ACTIVE_ASAP_LATER_ONLY_MSG);
+      return false;
+    }
     if (!selectedCompany) {
       setError("Please select a company.");
       return false;
@@ -1187,6 +1192,7 @@ export default function BookPage() {
               </a>
               <h1 className="text-3xl md:text-4xl font-display font-black text-foreground mb-2">Choose a company</h1>
               <p className="text-muted-foreground font-medium mb-8">Select which company you'd like to book with.</p>
+              {activeBooking && <ActiveBookingAlert conflict={activeBooking} />}
 
               {loadingCompanies ? (
                 <div className="flex items-center gap-3 text-muted-foreground py-12 justify-center">
@@ -1376,9 +1382,7 @@ export default function BookPage() {
                 )}
               </p>
 
-              {activeBooking && bookingType === "now" && (
-                <ActiveBookingAlert conflict={activeBooking} />
-              )}
+              {activeBooking && <ActiveBookingAlert conflict={activeBooking} />}
 
               <div className="flex flex-col lg:grid lg:grid-cols-2 lg:gap-6 lg:items-start overflow-visible">
                 <div
@@ -1388,6 +1392,11 @@ export default function BookPage() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
+                  if (bookingType === "now" && activeBooking) {
+                    setBookingType("scheduled");
+                    setError(ACTIVE_ASAP_LATER_ONLY_MSG);
+                    return;
+                  }
                   if (paymentMethod === "tm") {
                     if (!paymentRef.trim()) {
                       setError("Please enter your TM card number.");
@@ -1582,12 +1591,21 @@ export default function BookPage() {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => setBookingType("now")}
+                      disabled={!!activeBooking}
+                      onClick={() => {
+                        if (activeBooking) {
+                          setBookingType("scheduled");
+                          setError(ACTIVE_ASAP_LATER_ONLY_MSG);
+                          return;
+                        }
+                        setBookingType("now");
+                      }}
                       className={`flex items-center justify-center gap-2 rounded-xl h-11 font-semibold text-sm border transition-colors ${
                         bookingType === "now"
                           ? "bg-primary text-primary-foreground border-primary"
                           : "bg-background text-muted-foreground border-border hover:border-foreground/30"
-                      }`}
+                      } ${activeBooking ? "opacity-50 cursor-not-allowed" : ""}`}
+                      data-testid="book-when-now"
                     >
                       <Zap className="w-4 h-4" /> Now
                     </button>
@@ -1603,6 +1621,11 @@ export default function BookPage() {
                       <CalendarClock className="w-4 h-4" /> Schedule
                     </button>
                   </div>
+                  {activeBooking && (
+                    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" data-testid="asap-later-only-hint">
+                      {ACTIVE_ASAP_LATER_ONLY_MSG}
+                    </div>
+                  )}
                   {bookingType === "now" && selectedCompany?.asapBookable === false && (
                     <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                       {selectedCompany.asapBlockReason === "outside_hours" ||
@@ -1937,9 +1960,7 @@ export default function BookPage() {
               <h1 className="text-3xl md:text-4xl font-display font-black text-foreground mb-2">Confirm booking</h1>
               <p className="text-muted-foreground font-medium mb-8">Check everything looks right before sending.</p>
 
-              {activeBooking && bookingType === "now" && (
-                <ActiveBookingAlert conflict={activeBooking} />
-              )}
+              {activeBooking && <ActiveBookingAlert conflict={activeBooking} />}
 
               <div className="bg-card border border-border/80 rounded-2xl p-6 md:p-8 shadow-sm space-y-4 mb-6">
                 <Row label="Company" value={selectedCompany?.name ?? ""} />
@@ -2466,13 +2487,13 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function ActiveBookingAlert({ conflict }: { conflict: ActiveBookingConflict }) {
   return (
-    <div className="mb-6 p-5 bg-amber-50 border border-amber-200 rounded-2xl text-left">
+    <div className="mb-6 p-5 bg-amber-50 border border-amber-200 rounded-2xl text-left" data-testid="asap-later-only-alert">
       <div className="flex items-start gap-3">
         <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          <p className="font-bold text-amber-900">You already have an active booking</p>
+          <p className="font-bold text-amber-900">{ACTIVE_ASAP_LATER_ONLY_TITLE}</p>
           <p className="text-sm text-amber-800 mt-1">
-            {conflict.message}
+            {ACTIVE_ASAP_LATER_ONLY_MSG}
             {conflict.existingStatus && (
               <> · Status: <strong>{conflict.existingStatus}</strong></>
             )}

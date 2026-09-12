@@ -34,6 +34,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { getPassengerSession } from "@/lib/passengerKey";
+import {
+  ACTIVE_ASAP_LATER_ONLY_MSG,
+  ACTIVE_ASAP_LATER_ONLY_TITLE,
+  fetchActiveAsapBooking,
+} from "@/lib/asapDuplicateUx";
 import IdleSessionGuard from "@/components/IdleSessionGuard";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import NotFound from "@/pages/not-found";
@@ -216,14 +221,28 @@ function Home() {
   const [isScrolled, setIsScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [servicesOpen, setServicesOpen] = useState(false);
+  const [laterOnlyOpen, setLaterOnlyOpen] = useState(false);
+  const [bookNowChecking, setBookNowChecking] = useState(false);
   const appVersions = useAppVersions();
 
-  const handleBookNow = () => {
+  const handleBookNow = async () => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
     const session = getPassengerSession();
     if (!session?.uid) {
       window.location.href = `${base}/sign-in?next=/book`;
       return;
+    }
+    setBookNowChecking(true);
+    try {
+      const match = await fetchActiveAsapBooking(session.phone || "", "taxi", import.meta.env.BASE_URL);
+      if (match) {
+        setLaterOnlyOpen(true);
+        return;
+      }
+    } catch {
+      // Book page still gates ASAP if the check fails.
+    } finally {
+      setBookNowChecking(false);
     }
     window.location.href = `${base}/book`;
   };
@@ -284,8 +303,8 @@ function Home() {
                 Join as Operator
               </Button>
             </a>
-            <Button onClick={handleBookNow} className="bg-accent text-accent-foreground hover:bg-accent/90 rounded-full font-extrabold tracking-wide shadow-lg px-6" data-testid="nav-btn-book">
-              Book Now
+            <Button onClick={handleBookNow} disabled={bookNowChecking} className="bg-accent text-accent-foreground hover:bg-accent/90 rounded-full font-extrabold tracking-wide shadow-lg px-6" data-testid="nav-btn-book">
+              {bookNowChecking ? "Checking…" : "Book Now"}
             </Button>
           </div>
 
@@ -1075,6 +1094,42 @@ function Home() {
           </div>
         </div>
       </footer>
+      {laterOnlyOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 px-4"
+          data-testid="asap-later-only-modal"
+          onClick={() => setLaterOnlyOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-background p-6 shadow-2xl border border-border"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-xl font-display font-black text-foreground">{ACTIVE_ASAP_LATER_ONLY_TITLE}</h2>
+            <p className="mt-3 text-sm font-medium text-muted-foreground">{ACTIVE_ASAP_LATER_ONLY_MSG}</p>
+            <div className="mt-6 flex flex-col sm:flex-row gap-3">
+              <Button
+                className="flex-1 rounded-full font-bold"
+                onClick={() => {
+                  const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+                  window.location.href = `${base}/book`;
+                }}
+              >
+                Book Later
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1 rounded-full font-bold"
+                onClick={() => {
+                  const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+                  window.location.href = `${base}/my-rides`;
+                }}
+              >
+                View my booking
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

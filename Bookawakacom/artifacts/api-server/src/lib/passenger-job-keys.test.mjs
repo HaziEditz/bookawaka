@@ -5,6 +5,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { isLiveAsapStatus, jobLooksAsap, serviceTypesMatch } from "./asap-guard.ts";
+import {
+  ACTIVE_ASAP_LATER_ONLY_MSG,
+  parseActiveAsapCheck,
+} from "../../../invercargill-taxis/src/lib/asapDuplicateUx.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -48,4 +52,22 @@ test("duplicate ASAP guard matches empty ServiceType as taxi and scans all trees
   const create = readFileSync(join(root, "routes/booking.ts"), "utf8");
   assert.match(create, /findActiveBooking/);
   assert.match(create, /DUPLICATE_ACTIVE_BOOKING/);
+});
+
+test("website blocks ASAP at first tap and keeps Later available", () => {
+  assert.equal(
+    parseActiveAsapCheck({ hasActive: true, existingBookingId: "8692609121", existingStatus: "Pending" })
+      ?.existingBookingId,
+    "8692609121",
+  );
+  assert.equal(parseActiveAsapCheck({ hasActive: false }), null);
+  const book = readFileSync(join(root, "../../invercargill-taxis/src/pages/BookPage.tsx"), "utf8");
+  const home = readFileSync(join(root, "../../invercargill-taxis/src/App.tsx"), "utf8");
+  assert.match(book, /ACTIVE_ASAP_LATER_ONLY_MSG/);
+  assert.match(book, /disabled=\{\!\!activeBooking\}/);
+  assert.match(book, /if \(activeBooking\) \{/);
+  assert.match(book, /setBookingType\("scheduled"\)/);
+  assert.match(home, /asap-later-only-modal/);
+  assert.match(home, /fetchActiveAsapBooking/);
+  assert.match(ACTIVE_ASAP_LATER_ONLY_MSG, /Later booking/);
 });
